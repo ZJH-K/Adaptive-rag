@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+*.py[cod]
+
+# Local project instructions and task materials
+/Adaptive_RAG_Day1_Codex_Package/
+/adaptive_rag_project_technical_spec.md
+/AGENTS.md

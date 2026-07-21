@@ -1,0 +1,2 @@
+"""Adaptive RAG backend package."""
+
