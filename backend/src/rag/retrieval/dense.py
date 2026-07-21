@@ -1,0 +1,65 @@
+"""Dense vector retrieval over pre-ingested Chroma chunks."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from src.rag.schemas import SearchHit
+from src.rag.vectorstore.chroma import ChromaVectorStore
+
+
+class QueryEmbedder(Protocol):
+    """Query embedding capability required by dense retrieval."""
+
+    def embed_query(self, text: str) -> list[float]:
+        """Return one vector for a retrieval query."""
+        ...
+
+
+class DenseRetrievalConfigurationError(ValueError):
+    """Raised when dense retrieval parameters are invalid."""
+
+
+class DenseRetrievalInputError(ValueError):
+    """Raised when a retrieval query is blank or invalid."""
+
+
+class DenseRetriever:
+    """Embed a query and map cosine-distance results into SearchHit models."""
+
+    def __init__(
+        self,
+        embedding_client: QueryEmbedder,
+        vector_store: ChromaVectorStore,
+        *,
+        top_k: int = 20,
+    ) -> None:
+        """Configure the retriever's fixed maximum result count."""
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+            raise DenseRetrievalConfigurationError(
+                "DenseRetriever top_k must be a positive integer"
+            )
+        self.embedding_client = embedding_client
+        self.vector_store = vector_store
+        self.top_k = top_k
+
+    def retrieve(self, query: str) -> list[SearchHit]:
+        """Return dense results ordered from most to least relevant."""
+        if not isinstance(query, str) or not query.strip():
+            raise DenseRetrievalInputError("Query must be a non-empty string")
+
+        query_embedding = self.embedding_client.embed_query(query)
+        results = self.vector_store.query_by_vector(
+            query_embedding,
+            top_k=self.top_k,
+        )
+        return [
+            SearchHit(
+                chunk_id=result.chunk_id,
+                text=result.text,
+                metadata=result.metadata,
+                dense_score=1.0 - result.distance,
+            )
+            for result in results
+        ]
+

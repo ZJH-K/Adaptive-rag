@@ -5,6 +5,7 @@ __pycache__/
 .coverage
 htmlcov/
 *.py[cod]
+/backend/data/
 
 # Local project instructions and task materials
 /Adaptive_RAG_Day1_Codex_Package/
