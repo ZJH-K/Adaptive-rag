@@ -8,3 +8,6 @@ class ChunkerConfigurationError(ValueError):
 class UnsupportedChunkingStrategyError(ValueError):
     """Raised when the chunker factory receives an unknown strategy."""
 
+
+class IncompatibleChunkingStrategyError(ValueError):
+    """Raised when a chunking strategy cannot process a document type."""

@@ -5,7 +5,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from src.rag.chunking import RecursiveChunker
+from src.rag.chunking import IncompatibleChunkingStrategyError, RecursiveChunker
 from src.rag.embeddings import EmbeddingRequestError
 from src.rag.ingestion import IngestionPipeline
 from src.rag.parsers import DocumentParseError
@@ -129,3 +129,145 @@ def test_parser_error_propagates_without_embedding_or_write(tmp_path: Path) -> N
         assert embedder.document_calls == []
         assert store.count() == 0
 
+
+def test_markdown_heading_strategy_persists_section_metadata(tmp_path: Path) -> None:
+    document_path = tmp_path / "structured.md"
+    document_path.write_text(
+        "# Install\n\nOverview.\n\n## Configure\n\nConfiguration details.",
+        encoding="utf-8",
+    )
+
+    with _store(tmp_path / "chroma") as store:
+        result = IngestionPipeline(FakeEmbeddingClient(), store).ingest(
+            document_path,
+            chunk_strategy="markdown_heading",
+        )
+        stored_chunks = store.get_chunks_by_document_id(result.document_id)
+
+        assert result.chunks_count == 2
+        assert [chunk.section for chunk in stored_chunks] == [
+            "Install",
+            "Configure",
+        ]
+        assert [chunk.heading_path for chunk in stored_chunks] == [
+            ["Install"],
+            ["Install", "Configure"],
+        ]
+        assert all(
+            chunk.chunk_strategy == "markdown_heading"
+            for chunk in stored_chunks
+        )
+
+
+def test_pdf_page_aware_strategy_persists_page_metadata(tmp_path: Path) -> None:
+    document_path = tmp_path / "page-aware.pdf"
+    _create_pdf(document_path, ["First parsed page", "Second parsed page"])
+
+    with _store(tmp_path / "chroma") as store:
+        result = IngestionPipeline(FakeEmbeddingClient(), store).ingest(
+            document_path,
+            chunk_strategy="pdf_page_aware",
+        )
+        stored_chunks = store.get_chunks_by_document_id(result.document_id)
+
+        assert result.chunks_count == 2
+        assert [chunk.page for chunk in stored_chunks] == [1, 2]
+        assert all(
+            chunk.chunk_strategy == "pdf_page_aware" for chunk in stored_chunks
+        )
+
+
+def test_default_ingestion_strategy_remains_recursive(tmp_path: Path) -> None:
+    document_path = tmp_path / "default.md"
+    document_path.write_text("# Heading\n\nDefault body.", encoding="utf-8")
+
+    with _store(tmp_path / "chroma") as store:
+        result = IngestionPipeline(FakeEmbeddingClient(), store).ingest(
+            document_path
+        )
+        stored_chunks = store.get_chunks_by_document_id(result.document_id)
+
+        assert stored_chunks
+        assert all(chunk.chunk_strategy == "recursive" for chunk in stored_chunks)
+
+
+def test_same_strategy_reingestion_remains_idempotent(tmp_path: Path) -> None:
+    document_path = tmp_path / "repeat-structured.md"
+    document_path.write_text("# Stable\n\nStable body.", encoding="utf-8")
+
+    with _store(tmp_path / "chroma") as store:
+        pipeline = IngestionPipeline(FakeEmbeddingClient(), store)
+        first = pipeline.ingest(
+            document_path,
+            chunk_strategy="markdown_heading",
+        )
+        count_after_first = store.count()
+        second = pipeline.ingest(
+            document_path,
+            chunk_strategy="markdown_heading",
+        )
+
+        assert second.document_id == first.document_id
+        assert second.chunks_count == first.chunks_count
+        assert store.count() == count_after_first
+
+
+def test_different_strategies_create_distinct_document_representations(
+    tmp_path: Path,
+) -> None:
+    document_path = tmp_path / "comparison.md"
+    document_path.write_text(
+        "# Comparison\n\nStructured comparison body.",
+        encoding="utf-8",
+    )
+
+    with _store(tmp_path / "chroma") as store:
+        pipeline = IngestionPipeline(FakeEmbeddingClient(), store)
+        recursive = pipeline.ingest(document_path, chunk_strategy="recursive")
+        count_after_recursive = store.count()
+        structured = pipeline.ingest(
+            document_path,
+            chunk_strategy="markdown_heading",
+        )
+        stored_chunks = store.get_chunks_by_document_id(recursive.document_id)
+
+        assert structured.document_id == recursive.document_id
+        assert store.count() == count_after_recursive + structured.chunks_count
+        assert {chunk.chunk_strategy for chunk in stored_chunks} == {
+            "recursive",
+            "markdown_heading",
+        }
+
+
+@pytest.mark.parametrize(
+    ("suffix", "content", "strategy", "source_type"),
+    [
+        (".md", "Markdown body.", "pdf_page_aware", "markdown"),
+        (".pdf", None, "markdown_heading", "pdf"),
+    ],
+)
+def test_incompatible_ingestion_strategy_fails_before_embedding_or_write(
+    tmp_path: Path,
+    suffix: str,
+    content: str | None,
+    strategy: str,
+    source_type: str,
+) -> None:
+    document_path = tmp_path / f"incompatible{suffix}"
+    if content is None:
+        _create_pdf(document_path, ["PDF body"])
+    else:
+        document_path.write_text(content, encoding="utf-8")
+    embedder = FakeEmbeddingClient()
+
+    with _store(tmp_path / "chroma") as store:
+        pipeline = IngestionPipeline(embedder, store)
+
+        with pytest.raises(
+            IncompatibleChunkingStrategyError,
+            match=rf"{strategy}.*{source_type}",
+        ):
+            pipeline.ingest(document_path, chunk_strategy=strategy)
+
+        assert embedder.document_calls == []
+        assert store.count() == 0

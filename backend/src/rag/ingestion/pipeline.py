@@ -7,6 +7,11 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
+from src.rag.chunking.factory import (
+    Chunker,
+    ChunkerFactory,
+    ChunkingStrategy,
+)
 from src.rag.chunking.recursive import RecursiveChunker
 from src.rag.parsers.factory import ParserFactory
 from src.rag.vectorstore.chroma import ChromaVectorStore
@@ -34,25 +39,45 @@ class IngestionResult(BaseModel):
 
 
 class IngestionPipeline:
-    """Coordinate parsing, recursive chunking, embedding, and persistence."""
+    """Coordinate parsing, selected chunking, embedding, and persistence."""
 
     def __init__(
         self,
         embedding_client: DocumentEmbedder,
         vector_store: ChromaVectorStore,
         *,
-        chunker: RecursiveChunker | None = None,
+        chunker: Chunker | None = None,
+        chunk_size: int = 800,
+        chunk_overlap: int = 100,
     ) -> None:
-        """Inject pipeline components without performing any work."""
+        """Inject pipeline components and configure factory-created chunkers."""
         self.embedding_client = embedding_client
         self.vector_store = vector_store
-        self.chunker = chunker or RecursiveChunker()
+        self.chunker: Chunker = chunker or RecursiveChunker(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
 
-    def ingest(self, file_path: str | Path) -> IngestionResult:
-        """Synchronously ingest one supported document file."""
+    def ingest(
+        self,
+        file_path: str | Path,
+        chunk_strategy: ChunkingStrategy | None = None,
+    ) -> IngestionResult:
+        """Synchronously ingest a file with an optional explicit strategy."""
         parser = ParserFactory.get_parser(file_path)
         document = parser.parse(file_path)
-        chunks = self.chunker.chunk(document)
+        if chunk_strategy is None:
+            chunker = self.chunker
+        else:
+            chunker = ChunkerFactory.create(
+                chunk_strategy,
+                source_type=document.source_type,
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap,
+            )
+        chunks = chunker.chunk(document)
         if not chunks:
             raise IngestionError(
                 f"Document '{document.filename}' produced no ingestible chunks"
@@ -67,4 +92,3 @@ class IngestionPipeline:
             filename=document.filename,
             chunks_count=len(chunks),
         )
-
