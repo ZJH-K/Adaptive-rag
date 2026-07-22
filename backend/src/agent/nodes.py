@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, TypeVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel
 
 from src.agent.prompts import (
     DIRECT_ANSWER_PROMPT,
@@ -15,7 +14,7 @@ from src.agent.prompts import (
 )
 from src.agent.state import AgentState, RewriteResult, RouteDecision
 from src.llm.client import ChatMessage
-from src.llm.exceptions import LLMError
+from src.llm.exceptions import LLMError, LLMResponseError
 from src.rag.context_builder import ContextBuilder
 from src.rag.service import (
     NO_EVIDENCE_ANSWER,
@@ -28,6 +27,7 @@ from src.rag.service import (
 
 ROUTER_PARSE_FAILURE_REASON = "router_output_parse_failed"
 REWRITE_HISTORY_LIMIT = 6
+StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
 
 
 class TextGenerator(Protocol):
@@ -40,6 +40,14 @@ class TextGenerator(Protocol):
         """Return assistant text for ordered messages."""
         ...
 
+    def generate_structured(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+        response_model: type[StructuredOutputT],
+    ) -> StructuredOutputT:
+        """Return one provider-assisted, validated structured response."""
+        ...
+
 
 def route_query(
     state: AgentState,
@@ -49,13 +57,12 @@ def route_query(
 
     question = _require_question(state)
     prompt = format_router_prompt(question, state.get("chat_history"))
-    raw_decision = llm_client.generate(
-        [ChatMessage(role="user", content=prompt)]
-    )
-
     try:
-        decision = RouteDecision.model_validate(json.loads(raw_decision))
-    except (json.JSONDecodeError, ValidationError, TypeError):
+        decision = llm_client.generate_structured(
+            [ChatMessage(role="user", content=prompt)],
+            RouteDecision,
+        )
+    except LLMResponseError:
         return {
             "need_retrieval": True,
             "route_reason": ROUTER_PARSE_FAILURE_REASON,
@@ -92,13 +99,12 @@ def rewrite_query(
     question = _require_question(state)
     history = state.get("chat_history", [])[-REWRITE_HISTORY_LIMIT:]
     prompt = format_query_rewrite_prompt(question, history)
-    raw_result = llm_client.generate(
-        [ChatMessage(role="user", content=prompt)]
-    )
-
     try:
-        result = RewriteResult.model_validate(json.loads(raw_result))
-    except (json.JSONDecodeError, ValidationError, TypeError):
+        result = llm_client.generate_structured(
+            [ChatMessage(role="user", content=prompt)],
+            RewriteResult,
+        )
+    except LLMResponseError:
         return {"rewritten_query": question}
 
     return {"rewritten_query": result.rewritten_query}
@@ -124,6 +130,8 @@ def retrieve(
     return {
         "retrieved_documents": hits,
         "context": context_result.context,
+        "context_sources": context_result.sources,
+        "context_chunk_ids": context_result.used_chunk_ids,
     }
 
 

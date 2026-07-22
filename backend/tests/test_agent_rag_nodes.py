@@ -110,7 +110,81 @@ def test_retrieve_uses_rewritten_query_and_preserves_ranked_hits() -> None:
     assert result["retrieved_documents"][1].metadata["page"] == 4
     assert "[S1] langgraph.md | section Checkpoint" in result["context"]
     assert "[S2] manual.pdf | page 4" in result["context"]
-    assert set(result) == {"retrieved_documents", "context"}
+    assert [source.chunk_id for source in result["context_sources"]] == [
+        "md-2",
+        "pdf-1",
+    ]
+    assert result["context_chunk_ids"] == ["md-2", "pdf-1"]
+    assert set(result) == {
+        "retrieved_documents",
+        "context",
+        "context_sources",
+        "context_chunk_ids",
+    }
+
+
+def test_retrieve_preserves_builder_mapping_after_deduplication() -> None:
+    hits = [
+        SearchHit(
+            chunk_id="a",
+            text="Alpha.",
+            metadata={"source": "a.md", "content_hash": "same"},
+        ),
+        SearchHit(
+            chunk_id="b",
+            text="Duplicate alpha.",
+            metadata={"source": "b.md", "content_hash": "same"},
+        ),
+        SearchHit(
+            chunk_id="c",
+            text="Charlie.",
+            metadata={"source": "c.md", "content_hash": "unique"},
+        ),
+    ]
+
+    result = retrieve({"question": "mapping"}, FakeRetriever(hits))
+
+    assert result["retrieved_documents"] == hits
+    assert result["context_chunk_ids"] == ["a", "c"]
+    assert [
+        (source.citation_id, source.chunk_id, source.source)
+        for source in result["context_sources"]
+    ] == [("S1", "a", "a.md"), ("S2", "c", "c.md")]
+    assert "[S1] a.md\nAlpha." in result["context"]
+    assert "[S2] c.md\nCharlie." in result["context"]
+    assert "b.md" not in result["context"]
+
+
+def test_retrieve_excludes_budget_omissions_from_context_mapping() -> None:
+    hits = [
+        SearchHit(
+            chunk_id="included",
+            text="A" * 20,
+            metadata={"source": "first.md"},
+        ),
+        SearchHit(
+            chunk_id="truncated",
+            text="B" * 100,
+            metadata={"source": "second.md"},
+        ),
+        SearchHit(
+            chunk_id="omitted",
+            text="C" * 20,
+            metadata={"source": "third.md"},
+        ),
+    ]
+
+    result = retrieve(
+        {"question": "budget"},
+        FakeRetriever(hits),
+        ContextBuilder(max_chars=80),
+    )
+
+    assert result["context_chunk_ids"] == ["included", "truncated"]
+    assert [
+        source.chunk_id for source in result["context_sources"]
+    ] == ["included", "truncated"]
+    assert "third.md" not in result["context"]
 
 
 def test_retrieve_falls_back_to_original_question_without_valid_rewrite() -> None:
@@ -168,7 +242,12 @@ def test_empty_retrieval_is_stable_and_does_not_call_llm() -> None:
         llm,
     )
 
-    assert retrieval_state == {"retrieved_documents": [], "context": ""}
+    assert retrieval_state == {
+        "retrieved_documents": [],
+        "context": "",
+        "context_sources": [],
+        "context_chunk_ids": [],
+    }
     assert context_builder.calls == [[]]
     assert answer_state == {"answer": NO_EVIDENCE_ANSWER}
     assert llm.calls == []

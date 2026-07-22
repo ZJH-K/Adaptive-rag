@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    llm_json_mode_enabled: bool = True
+
+    hybrid_retrieval_enabled: bool = True
+    dense_top_n: int = Field(default=20, gt=0)
+    bm25_top_n: int = Field(default=20, gt=0)
+    fusion_top_n: int = Field(default=20, gt=0)
+    rrf_k: int = Field(default=60, gt=0)
 
     chroma_persist_dir: Path = Path("./data/chroma")
     chroma_collection: str = "technical_docs"

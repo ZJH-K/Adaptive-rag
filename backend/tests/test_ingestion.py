@@ -9,6 +9,7 @@ from src.rag.chunking import IncompatibleChunkingStrategyError, RecursiveChunker
 from src.rag.embeddings import EmbeddingRequestError
 from src.rag.ingestion import IngestionPipeline
 from src.rag.parsers import DocumentParseError
+from src.rag.retrieval import BM25Index
 from src.rag.vectorstore import ChromaVectorStore
 from tests.fakes import FakeEmbeddingClient
 
@@ -210,6 +211,35 @@ def test_same_strategy_reingestion_remains_idempotent(tmp_path: Path) -> None:
         assert second.document_id == first.document_id
         assert second.chunks_count == first.chunks_count
         assert store.count() == count_after_first
+
+
+def test_ingestion_rebuilds_bm25_index_from_complete_chroma_corpus(
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first.md"
+    second_path = tmp_path / "second.md"
+    first_path.write_text("First document thread_id.", encoding="utf-8")
+    second_path.write_text("Second document similarity_search.", encoding="utf-8")
+
+    with _store(tmp_path / "chroma") as store:
+        bm25_index = BM25Index()
+        pipeline = IngestionPipeline(
+            FakeEmbeddingClient(),
+            store,
+            bm25_index=bm25_index,
+        )
+        first = pipeline.ingest(first_path)
+        second = pipeline.ingest(second_path)
+
+        assert len(bm25_index) == store.count() == 2
+        assert {chunk.document_id for chunk in bm25_index.chunks} == {
+            first.document_id,
+            second.document_id,
+        }
+        assert bm25_index.generation == 2
+
+        restarted_index = BM25Index.from_chunks(store.get_all_chunks())
+        assert restarted_index.chunk_ids == bm25_index.chunk_ids
 
 
 def test_different_strategies_create_distinct_document_representations(

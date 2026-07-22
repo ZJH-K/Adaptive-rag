@@ -5,7 +5,9 @@ from src.llm.client import (
     ChatMessage,
     ChatResource,
     DeepSeekClient,
+    JSON_OBJECT_RESPONSE_FORMAT,
     LLMAPIClient,
+    parse_structured_output,
 )
 from src.llm.exceptions import (
     LLMConfigurationError,
@@ -21,7 +23,9 @@ __all__ = [
     "ChatMessage",
     "ChatResource",
     "DeepSeekClient",
+    "JSON_OBJECT_RESPONSE_FORMAT",
     "LLMAPIClient",
+    "parse_structured_output",
     "LLMConfigurationError",
     "LLMError",
     "LLMInputError",

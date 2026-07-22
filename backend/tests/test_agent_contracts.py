@@ -12,6 +12,7 @@ from src.agent.prompts import (
     format_router_prompt,
 )
 from src.agent.state import AgentState, RewriteResult, RouteDecision
+from src.rag.context_builder import ContextSource
 from src.rag.schemas import SearchHit
 
 
@@ -26,10 +27,14 @@ def test_agent_state_matches_the_workflow_contract() -> None:
         "rewritten_query",
         "retrieved_documents",
         "context",
+        "context_sources",
+        "context_chunk_ids",
         "answer",
         "trace_id",
     }
     assert annotations["retrieved_documents"] == list[SearchHit]
+    assert annotations["context_sources"] == list[ContextSource]
+    assert annotations["context_chunk_ids"] == list[str]
     assert AgentState.__total__ is False
 
 
