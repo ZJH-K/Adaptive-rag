@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openai.types.chat import ChatCompletion
 
+from src.agent.state import RewriteResult, RouteDecision
 from src.config import Settings
 from src.llm import (
     ChatMessage,
@@ -14,6 +16,7 @@ from src.llm import (
     LLMRequestError,
     LLMResponseError,
     LLMTimeoutError,
+    parse_structured_output,
 )
 
 
@@ -36,14 +39,16 @@ class FakeCompletionsResource:
         model: str,
         messages: list[dict[str, str]],
         temperature: float,
+        response_format: dict[str, str] | None = None,
     ) -> Any:
-        self.calls.append(
-            {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-            }
-        )
+        call: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if response_format is not None:
+            call["response_format"] = response_format
+        self.calls.append(call)
         if self.error is not None:
             raise self.error
         if self.response is not None:
@@ -98,6 +103,95 @@ def test_generate_extracts_assistant_text_and_normalizes_messages() -> None:
             "temperature": 0.1,
         }
     ]
+
+
+def test_generate_structured_enables_json_mode_and_validates_model() -> None:
+    fake = FakeAPIClient(
+        FakeCompletionsResource(
+            content='{"need_retrieval": true, "reason": "document"}'
+        )
+    )
+
+    result = _client(fake).generate_structured(
+        [{"role": "user", "content": "Return JSON."}],
+        RouteDecision,
+    )
+
+    assert result == RouteDecision(need_retrieval=True, reason="document")
+    assert fake.chat.completions.calls[0]["response_format"] == {
+        "type": "json_object"
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '```json\n{"rewritten_query": "standalone"}\n```',
+        'Result: {"rewritten_query": "standalone"}.',
+    ],
+)
+def test_structured_fallback_parses_wrapped_json_without_json_mode(
+    content: str,
+) -> None:
+    fake = FakeAPIClient(FakeCompletionsResource(content=content))
+
+    result = _client(fake, json_mode_enabled=False).generate_structured(
+        [{"role": "user", "content": "Return JSON."}],
+        RewriteResult,
+    )
+
+    assert result.rewritten_query == "standalone"
+    assert "response_format" not in fake.chat.completions.calls[0]
+
+
+def test_generate_structured_accepts_real_openai_sdk_response_shape() -> None:
+    response = ChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-offline",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                        "content": '{"rewritten_query": "SDK-shaped"}',
+                        "role": "assistant",
+                    },
+                }
+            ],
+            "created": 0,
+            "model": "deepseek-chat",
+            "object": "chat.completion",
+        }
+    )
+    fake = FakeAPIClient(FakeCompletionsResource(response=response))
+
+    result = _client(fake).generate_structured(
+        [{"role": "user", "content": "Return JSON."}],
+        RewriteResult,
+    )
+
+    assert result.rewritten_query == "SDK-shaped"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "not json",
+        "{}",
+        '{"need_retrieval": "yes", "reason": "wrong type"}',
+        '{"need_retrieval": true, "reason": "ok", "extra": 1}',
+    ],
+)
+def test_structured_output_rejects_empty_invalid_or_nonconforming_content(
+    content: str,
+) -> None:
+    if content:
+        with pytest.raises(LLMResponseError):
+            parse_structured_output(content, RouteDecision)
+    else:
+        with pytest.raises(LLMResponseError, match="empty"):
+            parse_structured_output(content, RouteDecision)
 
 
 def test_missing_api_key_fails_before_api_call() -> None:

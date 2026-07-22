@@ -1,11 +1,16 @@
 """Offline tests for the contextual query-rewrite node."""
 
 from collections.abc import Mapping, Sequence
+from typing import TypeVar
 
 import pytest
+from pydantic import BaseModel
 
 from src.agent.nodes import REWRITE_HISTORY_LIMIT, rewrite_query
-from src.llm.client import ChatMessage
+from src.llm.client import ChatMessage, parse_structured_output
+
+
+StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
 
 
 class FakeRewriteLLM:
@@ -21,6 +26,14 @@ class FakeRewriteLLM:
     ) -> str:
         self.calls.append(list(messages))
         return self.response
+
+    def generate_structured(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+        response_model: type[StructuredOutputT],
+    ) -> StructuredOutputT:
+        """Parse configured text through the production fallback parser."""
+        return parse_structured_output(self.generate(messages), response_model)
 
 
 def _sent_text(client: FakeRewriteLLM) -> str:
@@ -79,6 +92,21 @@ def test_standalone_question_keeps_its_original_topic() -> None:
 
 
 @pytest.mark.parametrize(
+    "output",
+    [
+        '```json\n{"rewritten_query": "独立问题"}\n```',
+        '结果如下：{"rewritten_query": "独立问题"}。',
+    ],
+)
+def test_rewrite_accepts_wrapped_valid_json(output: str) -> None:
+    llm = FakeRewriteLLM(output)
+
+    result = rewrite_query({"question": "它是什么？"}, llm)
+
+    assert result == {"rewritten_query": "独立问题"}
+
+
+@pytest.mark.parametrize(
     "invalid_output",
     [
         "not json",
@@ -86,7 +114,7 @@ def test_standalone_question_keeps_its_original_topic() -> None:
         '{"rewritten_query": "   "}',
         '{"rewritten_query": ["query one", "query two"]}',
         '{"rewritten_query": "valid", "extra": "forbidden"}',
-        '```json\n{"rewritten_query": "wrapped"}\n```',
+        "",
     ],
 )
 def test_invalid_rewrite_output_falls_back_to_original_question(

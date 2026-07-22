@@ -180,6 +180,20 @@ class ChromaVectorStore:
         chunks = self._parse_stored_chunks(result)
         return sorted(chunks, key=lambda chunk: chunk.chunk_index)
 
+    def get_all_chunks(self) -> list[Chunk]:
+        """Load every stored Chunk in deterministic BM25 corpus order."""
+        self._ensure_open()
+        result = self._collection.get(include=["documents", "metadatas"])
+        chunks = self._parse_stored_chunks(result)
+        return sorted(
+            chunks,
+            key=lambda chunk: (
+                chunk.document_id,
+                chunk.chunk_index,
+                chunk.chunk_id,
+            ),
+        )
+
     def contains_document(self, document_id: str) -> bool:
         """Return whether at least one chunk exists for a document."""
         self._ensure_open()
@@ -341,4 +355,3 @@ class ChromaVectorStore:
                 f"Chroma query returned invalid {key} data"
             )
         return first
-

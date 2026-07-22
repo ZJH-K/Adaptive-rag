@@ -1,14 +1,19 @@
 """Deterministic integration tests for the compiled adaptive RAG graph."""
 
 from collections.abc import Mapping, Sequence
+from typing import TypeVar
 
 import pytest
+from pydantic import BaseModel
 
 from src.agent.graph import build_graph
 from src.agent.nodes import ROUTER_PARSE_FAILURE_REASON
-from src.llm.client import ChatMessage
+from src.llm.client import ChatMessage, parse_structured_output
 from src.rag.schemas import SearchHit
 from src.rag.service import NO_EVIDENCE_ANSWER
+
+
+StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
 
 
 class WorkflowLLM:
@@ -68,6 +73,14 @@ class WorkflowLLM:
             return "根据文档，checkpoint 保存图状态 [S1]。"
 
         raise AssertionError("Unexpected LLM prompt")
+
+    def generate_structured(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+        response_model: type[StructuredOutputT],
+    ) -> StructuredOutputT:
+        """Run workflow text through the production structured parser."""
+        return parse_structured_output(self.generate(messages), response_model)
 
 
 class WorkflowRetriever:
@@ -175,6 +188,19 @@ def test_document_questions_follow_ordered_rag_branch(
     assert [hit.chunk_id for hit in result["retrieved_documents"]] == [
         "checkpoint-1"
     ]
+    assert result["context_chunk_ids"] == ["checkpoint-1"]
+    assert [source.model_dump() for source in result["context_sources"]] == [
+        {
+            "citation_id": "S1",
+            "citation": "langgraph_checkpoint.md | section Checkpoint",
+            "chunk_id": "checkpoint-1",
+            "source": "langgraph_checkpoint.md",
+            "source_type": "markdown",
+            "page": None,
+            "section": "Checkpoint",
+            "heading_path": ["Persistence", "Checkpoint"],
+        }
+    ]
     assert "[S1] langgraph_checkpoint.md | section Checkpoint" in result["context"]
     assert result["answer"] == "根据文档，checkpoint 保存图状态 [S1]。"
     assert events == ["route", "rewrite", "retrieve", "generate"]
@@ -220,5 +246,7 @@ def test_empty_retrieval_returns_no_evidence_without_generation() -> None:
     assert result["need_retrieval"] is True
     assert result["retrieved_documents"] == []
     assert result["context"] == ""
+    assert result["context_sources"] == []
+    assert result["context_chunk_ids"] == []
     assert result["answer"] == NO_EVIDENCE_ANSWER
     assert events == ["route", "rewrite", "retrieve"]

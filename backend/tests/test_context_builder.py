@@ -113,6 +113,12 @@ def test_duplicate_chunk_ids_and_content_hashes_are_removed() -> None:
     assert "Repeated ID" not in result.context
     assert "Repeated content" not in result.context
     assert [source.citation_id for source in result.sources] == ["S1", "S2"]
+    assert [source.chunk_id for source in result.sources] == [
+        "chunk-1",
+        "chunk-3",
+    ]
+    assert "[S2]" in result.context
+    assert "Unique." in result.context
 
 
 def test_budget_truncates_in_order_and_never_exceeds_limit() -> None:
@@ -126,6 +132,10 @@ def test_budget_truncates_in_order_and_never_exceeds_limit() -> None:
 
     assert len(result.context) <= 75
     assert result.used_chunk_ids == ["chunk-1", "chunk-2"]
+    assert [source.chunk_id for source in result.sources] == [
+        "chunk-1",
+        "chunk-2",
+    ]
     assert "A" * 20 in result.context
     assert "B" in result.context
     assert "C" not in result.context
@@ -174,6 +184,39 @@ def test_sources_and_used_ids_stay_aligned() -> None:
         "S2",
         "S3",
     ]
+
+
+def test_context_result_serializes_the_complete_citation_mapping() -> None:
+    result = ContextBuilder().build(
+        [
+            _hit(
+                "pdf-7",
+                "Serialized source.",
+                source="manual.pdf",
+                source_type="pdf",
+                page=7,
+            )
+        ]
+    )
+
+    payload = result.model_dump(mode="json")
+
+    assert payload == {
+        "context": "[S1] manual.pdf | page 7\nSerialized source.",
+        "sources": [
+            {
+                "citation_id": "S1",
+                "citation": "manual.pdf | page 7",
+                "chunk_id": "pdf-7",
+                "source": "manual.pdf",
+                "source_type": "pdf",
+                "page": 7,
+                "section": None,
+                "heading_path": [],
+            }
+        ],
+        "used_chunk_ids": ["pdf-7"],
+    }
 
 
 @pytest.mark.parametrize("max_chars", [0, -1, 1.5, True])

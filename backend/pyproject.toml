@@ -5,11 +5,13 @@ description = "Backend components for the Adaptive RAG project"
 requires-python = ">=3.11"
 dependencies = [
     "chromadb>=1.0,<2",
+    "jieba>=0.42.1,<1",
     "langgraph>=0.3,<2",
     "openai>=1.0,<3",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",
     "pymupdf>=1.24,<2",
+    "rank-bm25>=0.2.2,<1",
 ]
 
 [dependency-groups]
@@ -22,3 +24,6 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--strict-markers"
+markers = [
+    "external_llm: opt-in tests that call the configured external LLM API",
+]

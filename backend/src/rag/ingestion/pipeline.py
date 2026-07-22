@@ -14,6 +14,7 @@ from src.rag.chunking.factory import (
 )
 from src.rag.chunking.recursive import RecursiveChunker
 from src.rag.parsers.factory import ParserFactory
+from src.rag.retrieval.bm25_index import BM25Index
 from src.rag.vectorstore.chroma import ChromaVectorStore
 
 
@@ -49,6 +50,7 @@ class IngestionPipeline:
         chunker: Chunker | None = None,
         chunk_size: int = 800,
         chunk_overlap: int = 100,
+        bm25_index: BM25Index | None = None,
     ) -> None:
         """Inject pipeline components and configure factory-created chunkers."""
         self.embedding_client = embedding_client
@@ -59,6 +61,7 @@ class IngestionPipeline:
         )
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.bm25_index = bm25_index
 
     def ingest(
         self,
@@ -87,6 +90,8 @@ class IngestionPipeline:
             [chunk.text for chunk in chunks]
         )
         self.vector_store.upsert_chunks(chunks, embeddings)
+        if self.bm25_index is not None:
+            self.bm25_index.rebuild(self.vector_store.get_all_chunks())
         return IngestionResult(
             document_id=document.document_id,
             filename=document.filename,

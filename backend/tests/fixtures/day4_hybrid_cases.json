@@ -1,0 +1,138 @@
+{
+  "top_k": 3,
+  "chunks": [
+    {
+      "chunk_id": "checkpoint-thread",
+      "document_id": "langgraph-guide",
+      "text": "LangGraph checkpoint 持久化使用 thread_id 标识一次图执行。",
+      "chunk_index": 0,
+      "source": "langgraph.md",
+      "source_type": "markdown",
+      "section": "Checkpoint",
+      "heading_path": ["Persistence", "Checkpoint"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-checkpoint-thread"
+    },
+    {
+      "chunk_id": "chroma-similarity",
+      "document_id": "chroma-guide",
+      "text": "Chroma 使用 similarity_search 函数返回最相似的文档块。",
+      "chunk_index": 0,
+      "source": "chroma.md",
+      "source_type": "markdown",
+      "section": "Query API",
+      "heading_path": ["Chroma", "Query API"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-chroma-similarity"
+    },
+    {
+      "chunk_id": "bge-reranker",
+      "document_id": "model-guide",
+      "text": "BAAI/bge-reranker-v2-m3 是用于候选重排的 Cross-Encoder 模型。",
+      "chunk_index": 0,
+      "source": "models.md",
+      "source_type": "markdown",
+      "section": "Reranker",
+      "heading_path": ["Models", "Reranker"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-bge-reranker"
+    },
+    {
+      "chunk_id": "bge-embedding",
+      "document_id": "model-guide",
+      "text": "BAAI/bge-m3 是生成多语言文本向量的 Embedding 模型。",
+      "chunk_index": 1,
+      "source": "models.md",
+      "source_type": "markdown",
+      "section": "Embedding",
+      "heading_path": ["Models", "Embedding"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-bge-embedding"
+    },
+    {
+      "chunk_id": "rrf-fusion",
+      "document_id": "retrieval-guide",
+      "text": "Reciprocal Rank Fusion（RRF）按照排名倒数融合 Dense 与 BM25 结果。",
+      "chunk_index": 0,
+      "source": "retrieval.md",
+      "source_type": "markdown",
+      "section": "RRF",
+      "heading_path": ["Hybrid Retrieval", "RRF"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-rrf-fusion"
+    },
+    {
+      "chunk_id": "semantic-state",
+      "document_id": "state-guide",
+      "text": "图状态持久化会为每次会话关联一个独立的执行标识符。",
+      "chunk_index": 0,
+      "source": "state.md",
+      "source_type": "markdown",
+      "section": "State Persistence",
+      "heading_path": ["State", "Persistence"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-semantic-state"
+    },
+    {
+      "chunk_id": "semantic-vector",
+      "document_id": "vector-guide",
+      "text": "向量数据库能够查找语义相近的段落并按相关性返回。",
+      "chunk_index": 0,
+      "source": "vector.md",
+      "source_type": "markdown",
+      "section": "Semantic Search",
+      "heading_path": ["Vector Search", "Semantic"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-semantic-vector"
+    },
+    {
+      "chunk_id": "generic-ranking",
+      "document_id": "ranking-guide",
+      "text": "多语言排序模型可以对候选文档进行相关性评分。",
+      "chunk_index": 0,
+      "source": "ranking.md",
+      "source_type": "markdown",
+      "section": "Ranking",
+      "heading_path": ["Ranking"],
+      "chunk_strategy": "markdown_heading",
+      "content_hash": "hash-generic-ranking"
+    }
+  ],
+  "cases": [
+    {
+      "id": "thread-id",
+      "query": "checkpoint 配置键 thread_id",
+      "relevant_chunk_ids": ["checkpoint-thread"],
+      "dense_ranking": ["semantic-state", "rrf-fusion", "generic-ranking", "semantic-vector", "checkpoint-thread", "chroma-similarity", "bge-embedding", "bge-reranker"],
+      "reason": "BM25 保留 thread_id，下划线精确词项把目标从 Dense 第 5 名提升。"
+    },
+    {
+      "id": "similarity-search",
+      "query": "Chroma similarity_search 如何调用",
+      "relevant_chunk_ids": ["chroma-similarity"],
+      "dense_ranking": ["semantic-vector", "bge-embedding", "generic-ranking", "rrf-fusion", "chroma-similarity", "checkpoint-thread", "bge-reranker", "semantic-state"],
+      "reason": "BM25 完整保留函数名 similarity_search，纠正语义干扰项。"
+    },
+    {
+      "id": "reranker-model",
+      "query": "BAAI/bge-reranker-v2-m3 重排模型",
+      "relevant_chunk_ids": ["bge-reranker"],
+      "dense_ranking": ["bge-embedding", "generic-ranking", "semantic-vector", "rrf-fusion", "bge-reranker", "checkpoint-thread", "chroma-similarity", "semantic-state"],
+      "reason": "BM25 区分相似模型名 bge-m3 与 bge-reranker-v2-m3。"
+    },
+    {
+      "id": "rrf-name",
+      "query": "RRF 融合公式",
+      "relevant_chunk_ids": ["rrf-fusion"],
+      "dense_ranking": ["generic-ranking", "rrf-fusion", "semantic-vector", "bge-reranker", "checkpoint-thread", "chroma-similarity", "bge-embedding", "semantic-state"],
+      "reason": "缩写 RRF 的关键词排名使目标从 Dense 第 2 名提升到融合第 1 名。"
+    },
+    {
+      "id": "semantic-checkpoint",
+      "query": "LangGraph 如何持久化图状态",
+      "relevant_chunk_ids": ["checkpoint-thread"],
+      "dense_ranking": ["checkpoint-thread", "semantic-state", "rrf-fusion", "semantic-vector", "generic-ranking", "chroma-similarity", "bge-embedding", "bge-reranker"],
+      "reason": "语义查询由 Dense 已正确排首，Hybrid 保持第 1 名，作为无差异对照。"
+    }
+  ]
+}

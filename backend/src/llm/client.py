@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from openai import APITimeoutError, OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from src.config import Settings
 from src.llm.exceptions import (
@@ -16,6 +17,10 @@ from src.llm.exceptions import (
     LLMResponseError,
     LLMTimeoutError,
 )
+
+
+StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
+JSON_OBJECT_RESPONSE_FORMAT = {"type": "json_object"}
 
 
 class ChatMessage(BaseModel):
@@ -34,6 +39,7 @@ class ChatCompletionsResource(Protocol):
         model: str,
         messages: list[dict[str, str]],
         temperature: float,
+        response_format: dict[str, str] | None = None,
     ) -> Any:
         """Create one non-streaming chat completion."""
         ...
@@ -63,6 +69,7 @@ class DeepSeekClient:
         model: str | None = None,
         timeout_seconds: float | None = None,
         temperature: float | None = None,
+        json_mode_enabled: bool | None = None,
         api_client: LLMAPIClient | None = None,
     ) -> None:
         """Initialize configuration without making a network request."""
@@ -78,6 +85,11 @@ class DeepSeekClient:
         self.temperature = (
             configured.llm_temperature if temperature is None else temperature
         )
+        self.json_mode_enabled = (
+            configured.llm_json_mode_enabled
+            if json_mode_enabled is None
+            else json_mode_enabled
+        )
         self._api_client = api_client
         self._validate_configuration()
 
@@ -86,31 +98,45 @@ class DeepSeekClient:
         messages: Sequence[ChatMessage | Mapping[str, object]],
     ) -> str:
         """Return non-empty assistant text for an ordered message sequence."""
+        return self._request_text(messages)
+
+    def generate_structured(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+        response_model: type[StructuredOutputT],
+    ) -> StructuredOutputT:
+        """Generate and strictly validate one structured JSON object."""
+        response_format = (
+            JSON_OBJECT_RESPONSE_FORMAT if self.json_mode_enabled else None
+        )
+        text = self._request_text(messages, response_format=response_format)
+        return parse_structured_output(text, response_model)
+
+    def _request_text(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+        *,
+        response_format: dict[str, str] | None = None,
+    ) -> str:
+        """Send one completion request and extract its assistant text."""
         normalized_messages = self._normalize_messages(messages)
         client = self._get_api_client()
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": normalized_messages,
+            "temperature": float(self.temperature),
+        }
+        if response_format is not None:
+            request["response_format"] = dict(response_format)
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=normalized_messages,
-                temperature=float(self.temperature),
-            )
+            response = client.chat.completions.create(**request)
         except (APITimeoutError, TimeoutError) as exc:
             raise LLMTimeoutError("LLM request timed out") from exc
         except Exception as exc:
             detail = self._safe_request_detail(exc)
             raise LLMRequestError(f"LLM request failed ({detail})") from exc
 
-        choices = getattr(response, "choices", None)
-        if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)):
-            raise LLMResponseError("LLM response has no valid choices list")
-        if not choices:
-            raise LLMResponseError("LLM response contains no choices")
-
-        message = getattr(choices[0], "message", None)
-        content = getattr(message, "content", None)
-        if not isinstance(content, str) or not content.strip():
-            raise LLMResponseError("LLM response contains no assistant text")
-        return content.strip()
+        return self._extract_assistant_text(response)
 
     def _validate_configuration(self) -> None:
         """Validate non-secret constructor configuration."""
@@ -132,6 +158,8 @@ class DeepSeekClient:
             raise LLMConfigurationError(
                 "LLM temperature must be between zero and two"
             )
+        if not isinstance(self.json_mode_enabled, bool):
+            raise LLMConfigurationError("LLM JSON mode flag must be a boolean")
 
     def _get_api_client(self) -> LLMAPIClient:
         """Validate the API key and lazily construct the SDK client."""
@@ -177,9 +205,52 @@ class DeepSeekClient:
         return normalized
 
     @staticmethod
+    def _extract_assistant_text(response: object) -> str:
+        """Extract text from the response shape returned by the OpenAI SDK."""
+        choices = getattr(response, "choices", None)
+        if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)):
+            raise LLMResponseError("LLM response has no valid choices list")
+        if not choices:
+            raise LLMResponseError("LLM response contains no choices")
+
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise LLMResponseError("LLM response contains no assistant text")
+        return content.strip()
+
+    @staticmethod
     def _safe_request_detail(exc: Exception) -> str:
         """Describe an upstream failure without including its response body."""
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int) and not isinstance(status_code, bool):
             return f"HTTP {status_code}"
         return type(exc).__name__
+
+
+def parse_structured_output(
+    text: str,
+    response_model: type[StructuredOutputT],
+) -> StructuredOutputT:
+    """Extract the first JSON object and validate it against a Pydantic model."""
+    if not isinstance(text, str) or not text.strip():
+        raise LLMResponseError("Structured LLM response is empty")
+
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        try:
+            return response_model.model_validate(payload)
+        except ValidationError as exc:
+            raise LLMResponseError(
+                f"Structured LLM response failed {response_model.__name__} validation"
+            ) from exc
+
+    raise LLMResponseError("Structured LLM response contains no valid JSON object")

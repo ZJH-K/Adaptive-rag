@@ -4,6 +4,7 @@ from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
+from src.rag.context_builder import ContextSource
 from src.rag.schemas import SearchHit
 
 
@@ -25,6 +26,8 @@ class AgentState(TypedDict, total=False):
     rewritten_query: str
     retrieved_documents: list[SearchHit]
     context: str
+    context_sources: list[ContextSource]
+    context_chunk_ids: list[str]
     answer: str
 
     trace_id: str

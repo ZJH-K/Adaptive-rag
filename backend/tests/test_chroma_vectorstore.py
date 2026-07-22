@@ -48,6 +48,26 @@ def test_batch_upsert_and_count(tmp_path: Path) -> None:
         assert store.count() == 3
 
 
+def test_get_all_chunks_returns_deterministic_complete_corpus(
+    tmp_path: Path,
+) -> None:
+    with _store(tmp_path / "chroma") as store:
+        chunks = [
+            _chunk(1, document_id="doc-b"),
+            _chunk(1, document_id="doc-a"),
+            _chunk(0, document_id="doc-a"),
+        ]
+        store.upsert_chunks(chunks, [[1.0, 0.0]] * len(chunks))
+
+        restored = store.get_all_chunks()
+
+        assert [chunk.chunk_id for chunk in restored] == [
+            "doc-a-chunk-0",
+            "doc-a-chunk-1",
+            "doc-b-chunk-1",
+        ]
+
+
 def test_collection_uses_cosine_distance(tmp_path: Path) -> None:
     with _store(tmp_path / "chroma") as store:
         assert store._collection.configuration["hnsw"]["space"] == "cosine"
