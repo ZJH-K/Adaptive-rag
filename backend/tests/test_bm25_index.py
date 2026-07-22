@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from threading import Event, Thread
+
 import pytest
 
 from src.rag.retrieval.bm25_index import BM25Index, DuplicateChunkIDError
@@ -135,3 +137,37 @@ def test_blank_query_tokens_return_aligned_zero_scores() -> None:
     )
 
     assert index.get_scores([]) == [0.0, 0.0]
+
+
+def test_rebuild_publishes_one_complete_snapshot() -> None:
+    rebuild_started = Event()
+    allow_rebuild = Event()
+
+    class BlockingTokenizer(WhitespaceTokenizer):
+        def tokenize(self, text: str) -> list[str]:
+            if text == "new corpus":
+                rebuild_started.set()
+                assert allow_rebuild.wait(timeout=5)
+            return super().tokenize(text)
+
+    index = BM25Index.from_chunks(
+        [_chunk("old", "old corpus")],
+        tokenizer=BlockingTokenizer(),
+    )
+    before = index.snapshot()
+    worker = Thread(
+        target=index.rebuild,
+        args=([_chunk("new", "new corpus")],),
+    )
+    worker.start()
+    assert rebuild_started.wait(timeout=5)
+
+    during = index.snapshot()
+    allow_rebuild.set()
+    worker.join(timeout=5)
+    after = index.snapshot()
+
+    assert during is before
+    assert during.chunk_ids == ("old",)
+    assert after.chunk_ids == ("new",)
+    assert after.generation == before.generation + 1

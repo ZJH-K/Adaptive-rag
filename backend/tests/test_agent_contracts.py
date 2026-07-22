@@ -11,8 +11,10 @@ from src.agent.prompts import (
     format_query_rewrite_prompt,
     format_router_prompt,
 )
+from src.agent.failures import WorkflowFailure
 from src.agent.state import AgentState, RewriteResult, RouteDecision
 from src.rag.context_builder import ContextSource
+from src.rag.retrieval import RetrievalDiagnostics
 from src.rag.schemas import SearchHit
 
 
@@ -29,12 +31,19 @@ def test_agent_state_matches_the_workflow_contract() -> None:
         "context",
         "context_sources",
         "context_chunk_ids",
+        "retrieval_diagnostics",
         "answer",
+        "current_stage",
+        "degradation_events",
+        "fatal_error",
+        "answer_available",
         "trace_id",
     }
     assert annotations["retrieved_documents"] == list[SearchHit]
     assert annotations["context_sources"] == list[ContextSource]
     assert annotations["context_chunk_ids"] == list[str]
+    assert annotations["retrieval_diagnostics"] is RetrievalDiagnostics
+    assert annotations["fatal_error"] == WorkflowFailure | None
     assert AgentState.__total__ is False
 
 

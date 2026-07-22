@@ -120,6 +120,9 @@ def test_retrieve_uses_rewritten_query_and_preserves_ranked_hits() -> None:
         "context",
         "context_sources",
         "context_chunk_ids",
+        "current_stage",
+        "answer_available",
+        "trace_id",
     }
 
 
@@ -217,14 +220,15 @@ def test_generate_answer_uses_original_question_and_built_context() -> None:
         llm,
     )
 
-    assert result == {"answer": "状态由 checkpointer 保存 [S1]。"}
+    assert result["answer"] == "状态由 checkpointer 保存 [S1]。"
     assert len(llm.calls) == 1
     sent_text = _message_text(llm.calls[0])
     assert "原始问题：它如何保存状态？" in sent_text
     assert "LangGraph checkpoint 如何保存状态？" not in sent_text
     assert "Checkpoint 按 thread 保存图状态。" in sent_text
     assert "[S1]" in sent_text
-    assert set(result) == {"answer"}
+    assert result["current_stage"] == "generation"
+    assert result["answer_available"] is True
 
 
 def test_empty_retrieval_is_stable_and_does_not_call_llm() -> None:
@@ -247,9 +251,13 @@ def test_empty_retrieval_is_stable_and_does_not_call_llm() -> None:
         "context": "",
         "context_sources": [],
         "context_chunk_ids": [],
+        "current_stage": "context",
+        "answer_available": False,
+        "trace_id": retrieval_state["trace_id"],
     }
     assert context_builder.calls == [[]]
-    assert answer_state == {"answer": NO_EVIDENCE_ANSWER}
+    assert answer_state["answer"] == NO_EVIDENCE_ANSWER
+    assert answer_state["answer_available"] is True
     assert llm.calls == []
 
 

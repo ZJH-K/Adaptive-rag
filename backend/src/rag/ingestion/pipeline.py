@@ -30,6 +30,10 @@ class IngestionError(RuntimeError):
     """Raised when a parsed document cannot produce ingestible chunks."""
 
 
+class BM25IndexSyncError(IngestionError):
+    """Raised when vectors persisted but the in-memory BM25 refresh failed."""
+
+
 class IngestionResult(BaseModel):
     """Summary returned after a document is successfully persisted."""
 
@@ -91,7 +95,14 @@ class IngestionPipeline:
         )
         self.vector_store.upsert_chunks(chunks, embeddings)
         if self.bm25_index is not None:
-            self.bm25_index.rebuild(self.vector_store.get_all_chunks())
+            try:
+                self.bm25_index.rebuild(self.vector_store.get_all_chunks())
+            except Exception as exc:
+                self.bm25_index.mark_needs_rebuild()
+                raise BM25IndexSyncError(
+                    "Vector persistence succeeded, but BM25 refresh failed; "
+                    "the index is marked for a full rebuild"
+                ) from exc
         return IngestionResult(
             document_id=document.document_id,
             filename=document.filename,

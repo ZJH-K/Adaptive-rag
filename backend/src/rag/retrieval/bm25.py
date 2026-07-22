@@ -26,18 +26,33 @@ class BM25Retriever:
         self.index = index
         self.top_n = top_n
 
-    def retrieve(self, query: str) -> list[SearchHit]:
-        """Return raw BM25 scores in descending order; higher is better."""
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_n: int | None = None,
+    ) -> list[SearchHit]:
+        """Return ranked BM25 hits using one immutable index snapshot."""
         if not isinstance(query, str):
             raise BM25RetrievalInputError("BM25 query must be a string")
-        if not query.strip() or self.index.is_empty:
+        effective_top_n = self.top_n if top_n is None else top_n
+        if (
+            not isinstance(effective_top_n, int)
+            or isinstance(effective_top_n, bool)
+            or effective_top_n <= 0
+        ):
+            raise BM25RetrievalConfigurationError(
+                "BM25Retriever top_n must be a positive integer"
+            )
+        snapshot = self.index.snapshot()
+        if not query.strip() or snapshot.is_empty:
             return []
 
         query_tokens = self.index.tokenizer.tokenize(query)
         if not query_tokens:
             return []
 
-        scores = self.index.get_scores(query_tokens)
+        scores = snapshot.get_scores(query_tokens)
         ranked_positions = sorted(
             (
                 (position, score)
@@ -45,9 +60,9 @@ class BM25Retriever:
                 if score != 0.0
             ),
             key=lambda item: (-item[1], item[0]),
-        )[: self.top_n]
+        )[:effective_top_n]
         return [
-            self._to_search_hit(self.index.get_chunk(position), score)
+            self._to_search_hit(snapshot.get_chunk(position), score)
             for position, score in ranked_positions
         ]
 

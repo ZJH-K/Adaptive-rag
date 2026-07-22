@@ -7,7 +7,7 @@ import pytest
 
 from src.rag.chunking import IncompatibleChunkingStrategyError, RecursiveChunker
 from src.rag.embeddings import EmbeddingRequestError
-from src.rag.ingestion import IngestionPipeline
+from src.rag.ingestion import BM25IndexSyncError, IngestionPipeline
 from src.rag.parsers import DocumentParseError
 from src.rag.retrieval import BM25Index
 from src.rag.vectorstore import ChromaVectorStore
@@ -240,6 +240,33 @@ def test_ingestion_rebuilds_bm25_index_from_complete_chroma_corpus(
 
         restarted_index = BM25Index.from_chunks(store.get_all_chunks())
         assert restarted_index.chunk_ids == bm25_index.chunk_ids
+
+
+def test_bm25_rebuild_failure_never_reports_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_path = tmp_path / "index-failure.md"
+    document_path.write_text("Persisted before index refresh.", encoding="utf-8")
+
+    with _store(tmp_path / "chroma") as store:
+        bm25_index = BM25Index()
+        pipeline = IngestionPipeline(
+            FakeEmbeddingClient(),
+            store,
+            bm25_index=bm25_index,
+        )
+
+        def fail_rebuild(_chunks: object) -> None:
+            raise RuntimeError("synthetic rebuild failure")
+
+        monkeypatch.setattr(bm25_index, "rebuild", fail_rebuild)
+
+        with pytest.raises(BM25IndexSyncError, match="persistence succeeded"):
+            pipeline.ingest(document_path)
+
+        assert store.count() == 1
+        assert bm25_index.needs_rebuild is True
 
 
 def test_different_strategies_create_distinct_document_representations(

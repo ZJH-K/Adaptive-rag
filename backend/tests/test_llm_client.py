@@ -74,7 +74,7 @@ def _client(
     **overrides: Any,
 ) -> DeepSeekClient:
     arguments: dict[str, Any] = {
-        "settings": Settings(_env_file=None),
+        "settings": Settings(_env_file=None, llm_model="offline-chat-model"),
         "api_key": "offline-test-key",
         "api_client": fake or FakeAPIClient(),
     }
@@ -95,7 +95,7 @@ def test_generate_extracts_assistant_text_and_normalizes_messages() -> None:
     assert answer == "assistant response"
     assert fake.chat.completions.calls == [
         {
-            "model": "deepseek-chat",
+            "model": "offline-chat-model",
             "messages": [
                 {"role": "system", "content": "Be concise."},
                 {"role": "user", "content": "Reply with ok."},

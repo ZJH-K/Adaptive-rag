@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,10 @@ from src.rag.context_builder import (
     ContextSource,
 )
 from src.rag.schemas import SearchHit
+from src.rag.retrieval.pipeline import (
+    RetrievalDiagnostics,
+    RetrievalResult,
+)
 
 
 SYSTEM_PROMPT = """你是一个严谨的技术文档问答助手。
@@ -50,6 +54,26 @@ class Retriever(Protocol):
     def retrieve(self, query: str) -> list[SearchHit]:
         """Return ranked retrieval hits for a question."""
         ...
+
+
+@runtime_checkable
+class DiagnosticRetriever(Protocol):
+    """Optional request-local diagnostics capability of a Retriever."""
+
+    def retrieve_with_diagnostics(self, query: str) -> RetrievalResult:
+        """Return ranked hits and matching request diagnostics."""
+        ...
+
+
+def execute_retrieval(
+    retriever: Retriever,
+    query: str,
+) -> tuple[list[SearchHit], RetrievalDiagnostics | None]:
+    """Use diagnostics when available while preserving the base contract."""
+    if isinstance(retriever, DiagnosticRetriever):
+        result = retriever.retrieve_with_diagnostics(query)
+        return list(result.hits), result.diagnostics
+    return list(retriever.retrieve(query)), None
 
 
 class ContextConstructor(Protocol):
@@ -89,6 +113,7 @@ class RAGResponse(BaseModel):
     answer: str
     sources: list[ContextSource] = Field(default_factory=list)
     retrieved_chunk_ids: list[str] = Field(default_factory=list)
+    retrieval_diagnostics: RetrievalDiagnostics | None = None
 
 
 class BasicRAGService:
@@ -111,12 +136,18 @@ class BasicRAGService:
         normalized_question = self._validate_question(question)
         self._validate_top_k(top_k)
 
-        hits = self.retriever.retrieve(normalized_question)
+        hits, retrieval_diagnostics = execute_retrieval(
+            self.retriever,
+            normalized_question,
+        )
         if top_k is not None:
             hits = hits[:top_k]
         context_result = self.context_builder.build(hits)
         if not context_result.context or not context_result.sources:
-            return RAGResponse(answer=NO_EVIDENCE_ANSWER)
+            return RAGResponse(
+                answer=NO_EVIDENCE_ANSWER,
+                retrieval_diagnostics=retrieval_diagnostics,
+            )
 
         messages = self._build_messages(
             normalized_question,
@@ -133,6 +164,7 @@ class BasicRAGService:
             answer=answer,
             sources=context_result.sources,
             retrieved_chunk_ids=context_result.used_chunk_ids,
+            retrieval_diagnostics=retrieval_diagnostics,
         )
 
     @staticmethod
