@@ -8,6 +8,7 @@ from src.rag.retrieval.bm25 import (
 from src.rag.retrieval.bm25_index import (
     BM25Index,
     BM25IndexSnapshot,
+    BM25IndexStatus,
     DuplicateChunkIDError,
 )
 from src.rag.retrieval.dense import (
@@ -32,8 +33,18 @@ from src.rag.retrieval.pipeline import (
     RetrievalPipelineConfigurationError,
     RetrievalPipelineInputError,
 )
+from src.rag.retrieval.exceptions import (
+    BM25RetrievalUnavailableError,
+    DenseRetrievalUnavailableError,
+    RetrievalContractError,
+    RetrievalError,
+    RetrievalPathUnavailableError,
+    RetrievalUnavailableError,
+    VectorStoreUnavailableError,
+)
 from src.rag.retrieval.reranker import (
     NoOpReranker,
+    UnavailableReranker,
     RerankScore,
     Reranker,
     RerankerAdapter,
@@ -43,26 +54,32 @@ from src.rag.retrieval.reranker import (
     RerankerInputError,
     RerankerRequestError,
     RerankerResponseError,
+    RerankerStatus,
     RerankScoringClient,
     RerankTransport,
     UrllibRerankTransport,
     build_reranker,
+    get_reranker_status,
 )
 
 __all__ = [
     "BM25Index",
     "BM25IndexSnapshot",
+    "BM25IndexStatus",
     "BM25RetrievalConfigurationError",
     "BM25RetrievalInputError",
     "BM25Retriever",
+    "BM25RetrievalUnavailableError",
     "DenseRetrievalConfigurationError",
     "DenseRetrievalInputError",
     "DenseRetriever",
+    "DenseRetrievalUnavailableError",
     "DuplicateChunkIDError",
     "JiebaTokenizer",
     "HybridRetrievalPipeline",
     "QueryEmbedder",
     "NoOpReranker",
+    "UnavailableReranker",
     "RankedRetriever",
     "RerankScore",
     "Reranker",
@@ -73,9 +90,14 @@ __all__ = [
     "RerankerInputError",
     "RerankerRequestError",
     "RerankerResponseError",
+    "RerankerStatus",
     "RerankScoringClient",
     "RerankTransport",
     "RetrievalDiagnostics",
+    "RetrievalContractError",
+    "RetrievalError",
+    "RetrievalPathUnavailableError",
+    "RetrievalUnavailableError",
     "RetrievalHitDiagnostic",
     "RetrievalResult",
     "RetrievalPipelineConfigurationError",
@@ -85,6 +107,8 @@ __all__ = [
     "RRFFusionDuplicateError",
     "Tokenizer",
     "UrllibRerankTransport",
+    "VectorStoreUnavailableError",
     "build_reranker",
+    "get_reranker_status",
     "reciprocal_rank_fusion",
 ]

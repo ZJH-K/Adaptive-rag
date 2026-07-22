@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from openai import APIConnectionError
 
 from src.config import Settings
 from src.rag.embeddings import (
@@ -159,16 +161,30 @@ def test_missing_api_key_fails_only_when_embedding_is_requested() -> None:
 def test_api_request_error_is_wrapped_without_exposing_api_key() -> None:
     secret = "secret-value-that-must-not-leak"
     fake = FakeAPIClient(
-        FakeEmbeddingsResource(error=RuntimeError(f"upstream rejected {secret}"))
+        FakeEmbeddingsResource(
+            error=APIConnectionError(
+                message=f"upstream rejected {secret}",
+                request=httpx.Request("POST", "https://provider.invalid"),
+            )
+        )
     )
     client = _client(fake, api_key=secret)
 
     with pytest.raises(EmbeddingRequestError) as error:
         client.embed_query("query")
 
-    assert "RuntimeError" in str(error.value)
+    assert "APIConnectionError" in str(error.value)
     assert secret not in str(error.value)
     assert secret not in repr(error.value)
+
+
+def test_unknown_embedding_programming_error_is_not_wrapped() -> None:
+    fake = FakeAPIClient(
+        FakeEmbeddingsResource(error=RuntimeError("implementation bug"))
+    )
+
+    with pytest.raises(RuntimeError, match="implementation bug"):
+        _client(fake).embed_query("query")
 
 
 def test_response_count_mismatch_is_rejected() -> None:

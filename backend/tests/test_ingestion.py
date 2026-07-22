@@ -1,15 +1,16 @@
 """Integration tests for the synchronous ingestion pipeline."""
 
 from pathlib import Path
+from threading import Event, Thread
 
 import pymupdf
 import pytest
 
 from src.rag.chunking import IncompatibleChunkingStrategyError, RecursiveChunker
 from src.rag.embeddings import EmbeddingRequestError
-from src.rag.ingestion import BM25IndexSyncError, IngestionPipeline
+from src.rag.ingestion import IngestionPipeline
 from src.rag.parsers import DocumentParseError
-from src.rag.retrieval import BM25Index
+from src.rag.retrieval import BM25Index, BM25Retriever
 from src.rag.vectorstore import ChromaVectorStore
 from tests.fakes import FakeEmbeddingClient
 
@@ -262,11 +263,98 @@ def test_bm25_rebuild_failure_never_reports_success(
 
         monkeypatch.setattr(bm25_index, "rebuild", fail_rebuild)
 
-        with pytest.raises(BM25IndexSyncError, match="persistence succeeded"):
-            pipeline.ingest(document_path)
+        result = pipeline.ingest(document_path)
 
         assert store.count() == 1
+        assert result.status == "partial"
+        assert result.bm25_synced is False
+        assert result.error_code == "bm25_rebuild_failed"
+        assert result.index_status is not None
+        assert result.index_status.last_failure_code == "bm25_rebuild_failed"
         assert bm25_index.needs_rebuild is True
+
+
+def test_concurrent_ingestion_serializes_publish_and_keeps_both_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_path = tmp_path / "concurrent-first.md"
+    second_path = tmp_path / "concurrent-second.md"
+    first_path.write_text("first_unique_term", encoding="utf-8")
+    second_path.write_text("second_unique_term", encoding="utf-8")
+    first_snapshot_started = Event()
+    allow_first_snapshot = Event()
+    second_worker_started = Event()
+
+    with _store(tmp_path / "chroma") as store:
+        index = BM25Index()
+        pipeline = IngestionPipeline(
+            FakeEmbeddingClient(),
+            store,
+            bm25_index=index,
+        )
+        original_get_all = store.get_all_chunks
+        call_count = 0
+
+        def controlled_get_all():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_snapshot_started.set()
+                assert allow_first_snapshot.wait(timeout=5)
+            return original_get_all()
+
+        monkeypatch.setattr(store, "get_all_chunks", controlled_get_all)
+        results = []
+
+        first = Thread(target=lambda: results.append(pipeline.ingest(first_path)))
+
+        def ingest_second() -> None:
+            second_worker_started.set()
+            results.append(pipeline.ingest(second_path))
+
+        second = Thread(target=ingest_second)
+        first.start()
+        assert first_snapshot_started.wait(timeout=5)
+        second.start()
+        assert second_worker_started.wait(timeout=5)
+        allow_first_snapshot.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert len(results) == 2
+        assert all(result.status == "done" for result in results)
+        assert index.status().chunk_count == store.count() == 2
+        assert {chunk.text for chunk in index.chunks} == {
+            "first_unique_term",
+            "second_unique_term",
+        }
+        assert index.generation == 2
+
+
+def test_success_result_is_published_only_after_bm25_can_find_document(
+    tmp_path: Path,
+) -> None:
+    document_path = tmp_path / "immediate-query.md"
+    document_path.write_text("immediate_unique_keyword", encoding="utf-8")
+
+    with _store(tmp_path / "chroma") as store:
+        index = BM25Index()
+        result = IngestionPipeline(
+            FakeEmbeddingClient(),
+            store,
+            bm25_index=index,
+        ).ingest(document_path)
+
+        hits = BM25Retriever(index).retrieve("immediate_unique_keyword")
+
+        assert result.status == "done"
+        assert result.bm25_synced is True
+        assert result.index_status is not None
+        assert result.index_status.needs_rebuild is False
+        assert [hit.chunk_id for hit in hits]
 
 
 def test_different_strategies_create_distinct_document_representations(

@@ -9,7 +9,10 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import Settings
-from src.rag.embeddings.exceptions import EmbeddingRequestError
+from src.rag.retrieval.exceptions import (
+    RetrievalPathUnavailableError,
+    RetrievalUnavailableError,
+)
 from src.rag.retrieval.fusion import reciprocal_rank_fusion
 from src.rag.retrieval.reranker import (
     Reranker,
@@ -78,7 +81,11 @@ class RetrievalDiagnostics(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    mode: Literal["dense", "hybrid"]
+    mode: Literal["dense", "bm25", "hybrid"]
+    requested_mode: Literal["dense", "hybrid"]
+    rrf_entered: bool
+    rerank_entered: bool
+    final_count: int
     dense_count: int
     bm25_count: int
     fused_count: int
@@ -177,6 +184,7 @@ class HybridRetrievalPipeline:
         normalized_query = query.strip()
         total_started = self.clock()
         degraded_sources: list[RetrievalSource] = []
+        path_failure_codes: dict[RetrievalSource, str] = {}
 
         dense_started = self.clock()
         dense_hits = self._retrieve_path(
@@ -184,6 +192,7 @@ class HybridRetrievalPipeline:
             normalized_query,
             "dense",
             degraded_sources,
+            path_failure_codes,
             top_n=self.dense_top_n,
         )[: self.dense_top_n]
         dense_latency_ms = self._elapsed_ms(dense_started)
@@ -202,10 +211,13 @@ class HybridRetrievalPipeline:
                 normalized_query,
                 "bm25",
                 degraded_sources,
+                path_failure_codes,
                 top_n=self.bm25_top_n,
             )[: self.bm25_top_n]
             bm25_latency_ms = self._elapsed_ms(bm25_started)
 
+            if len(degraded_sources) == 2:
+                raise RetrievalUnavailableError()
             fusion_started = self.clock()
             candidates = self.fusion(
                 dense_hits,
@@ -215,8 +227,14 @@ class HybridRetrievalPipeline:
             )
             fusion_latency_ms = self._elapsed_ms(fusion_started)
             fused_count = len(candidates)
-            mode: Literal["dense", "hybrid"] = "hybrid"
+            mode: Literal["dense", "bm25", "hybrid"] = (
+                "bm25" if degraded_sources == ["dense"] else
+                "dense" if degraded_sources == ["bm25"] else
+                "hybrid"
+            )
         else:
+            if degraded_sources:
+                raise RetrievalUnavailableError()
             candidates = dense_hits[: self.retrieve_top_n]
             fused_count = 0
             mode = "dense"
@@ -225,9 +243,7 @@ class HybridRetrievalPipeline:
         rerank_output_count = 0
         rerank_latency_ms = 0.0
         reranker_degraded = False
-        degradation_codes = [
-            f"{source}_retrieval_failed" for source in degraded_sources
-        ]
+        degradation_codes = [path_failure_codes[source] for source in degraded_sources]
         final_hits = candidates[: self.rerank_top_k]
 
         if self.reranker_enabled and candidates:
@@ -249,6 +265,10 @@ class HybridRetrievalPipeline:
 
         diagnostics = RetrievalDiagnostics(
             mode=mode,
+            requested_mode="hybrid" if self.hybrid_enabled else "dense",
+            rrf_entered=self.hybrid_enabled,
+            rerank_entered=self.reranker_enabled and bool(candidates),
+            final_count=len(final_hits),
             dense_count=len(dense_hits),
             bm25_count=len(bm25_hits),
             fused_count=fused_count,
@@ -299,14 +319,20 @@ class HybridRetrievalPipeline:
         query: str,
         source: RetrievalSource,
         degraded: list[RetrievalSource],
+        failure_codes: dict[RetrievalSource, str],
         *,
         top_n: int,
     ) -> list[SearchHit]:
         """Return one path or record a recognized external-service failure."""
         try:
             return list(retriever.retrieve(query, top_n=top_n))
-        except EmbeddingRequestError:
+        except RetrievalPathUnavailableError as exc:
+            if source == "bm25" and exc.path != "bm25":
+                raise
+            if source == "dense" and exc.path not in {"dense", "vector_store"}:
+                raise
             degraded.append(source)
+            failure_codes[source] = exc.code
             return []
 
     @staticmethod

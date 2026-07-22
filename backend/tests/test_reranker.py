@@ -18,7 +18,9 @@ from src.rag.retrieval import (
     RerankerInputError,
     RerankerRequestError,
     RerankerResponseError,
+    UnavailableReranker,
     build_reranker,
+    get_reranker_status,
 )
 from src.rag.schemas import SearchHit
 
@@ -347,3 +349,34 @@ def test_enabled_factory_uses_configured_top_n() -> None:
     result = reranker.rerank("query", [_hit(0), _hit(1)])
 
     assert [hit.chunk_id for hit in result] == ["chunk-1"]
+
+
+def test_enabled_without_credentials_is_explicitly_unavailable() -> None:
+    reranker = build_reranker(
+        Settings(_env_file=None, reranker_enabled=True, reranker_api_key=None)
+    )
+
+    status = get_reranker_status(reranker)
+
+    assert isinstance(reranker, UnavailableReranker)
+    assert status.enabled is True
+    assert status.configured is False
+    assert status.available is False
+    assert status.last_error_code == "reranker_not_configured"
+
+
+def test_adapter_readiness_tracks_safe_runtime_error() -> None:
+    class FailedClient:
+        def score(self, query: str, documents: list[str]) -> list[RerankScore]:
+            raise RerankerRequestError("private provider response")
+
+    reranker = RerankerAdapter(FailedClient(), model="test-model")
+
+    with pytest.raises(RerankerRequestError):
+        reranker.rerank("query", [_hit(0)])
+
+    status = reranker.get_status()
+    assert status.available is False
+    assert status.model == "test-model"
+    assert status.last_error_code == "reranker_request_failed"
+    assert "private provider response" not in status.model_dump_json()

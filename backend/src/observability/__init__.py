@@ -5,7 +5,9 @@ from src.observability.tracing import (
     FakeTraceObserver,
     NoOpTraceObserver,
     ObservationRecord,
+    ObservationToken,
     TraceObserver,
+    TracingStatus,
     TracingPolicy,
 )
 
@@ -14,7 +16,9 @@ __all__ = [
     "LangfuseTraceObserver",
     "NoOpTraceObserver",
     "ObservationRecord",
+    "ObservationToken",
     "TraceObserver",
     "TracingPolicy",
+    "TracingStatus",
     "build_trace_observer",
 ]

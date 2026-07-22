@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.rag.retrieval.bm25_index import BM25Index
+from src.rag.retrieval.exceptions import BM25RetrievalUnavailableError
 from src.rag.schemas import Chunk, SearchHit
 
 
@@ -45,14 +46,28 @@ class BM25Retriever:
                 "BM25Retriever top_n must be a positive integer"
             )
         snapshot = self.index.snapshot()
+        if self.index.needs_rebuild:
+            raise BM25RetrievalUnavailableError(code="bm25_index_stale")
+        if not snapshot.is_built:
+            raise BM25RetrievalUnavailableError(code="bm25_index_unavailable")
         if not query.strip() or snapshot.is_empty:
             return []
 
-        query_tokens = self.index.tokenizer.tokenize(query)
+        try:
+            query_tokens = self.index.tokenizer.tokenize(query)
+        except (OSError, UnicodeError) as exc:
+            raise BM25RetrievalUnavailableError(
+                code="bm25_tokenizer_failed"
+            ) from exc
         if not query_tokens:
             return []
 
-        scores = snapshot.get_scores(query_tokens)
+        try:
+            scores = snapshot.get_scores(query_tokens)
+        except (OSError, UnicodeError) as exc:
+            raise BM25RetrievalUnavailableError(
+                code="bm25_index_query_failed"
+            ) from exc
         ranked_positions = sorted(
             (
                 (position, score)

@@ -9,14 +9,20 @@ from typing import Any
 import pytest
 
 from src.config import Settings
-from src.rag.embeddings.exceptions import EmbeddingRequestError
+from src.rag.embeddings.exceptions import (
+    EmbeddingRequestError,
+    EmbeddingResponseError,
+)
 from src.rag.retrieval import (
     BM25Index,
+    BM25RetrievalUnavailableError,
     BM25Retriever,
     DenseRetriever,
+    DenseRetrievalUnavailableError,
     HybridRetrievalPipeline,
     RetrievalPipelineConfigurationError,
     RetrievalPipelineInputError,
+    RetrievalUnavailableError,
     RerankerConfigurationError,
     RerankerError,
     RerankerInputError,
@@ -260,7 +266,7 @@ def test_one_empty_path_continues_with_the_other(
 
 
 def test_known_dense_failure_degrades_to_bm25_and_is_observable() -> None:
-    dense = FakeRetriever(error=EmbeddingRequestError("offline"))
+    dense = FakeRetriever(error=DenseRetrievalUnavailableError())
     bm25 = FakeRetriever([_hit("keyword", bm25_score=2.0)])
     pipeline = HybridRetrievalPipeline(dense, bm25, settings=_settings())
 
@@ -271,11 +277,50 @@ def test_known_dense_failure_degrades_to_bm25_and_is_observable() -> None:
     assert result.diagnostics.degraded_sources == ("dense",)
     assert result.diagnostics.dense_count == 0
     assert result.diagnostics.bm25_count == 1
+    assert result.diagnostics.mode == "bm25"
+    assert result.diagnostics.degradation_codes == (
+        "dense_retrieval_unavailable",
+    )
+    assert result.diagnostics.final_count == 1
+    assert result.diagnostics.rrf_entered is True
+
+
+def test_dense_adapter_converts_embedding_request_failure_only() -> None:
+    class FailedEmbedder:
+        def embed_query(self, text: str) -> list[float]:
+            raise EmbeddingRequestError("private provider response")
+
+    class UnusedStore:
+        def query_by_vector(self, query_embedding, top_k):
+            raise AssertionError("vector store must not run")
+
+    retriever = DenseRetriever(FailedEmbedder(), UnusedStore())  # type: ignore[arg-type]
+
+    with pytest.raises(DenseRetrievalUnavailableError) as raised:
+        retriever.retrieve("query")
+
+    assert raised.value.code == "embedding_request_failed"
+    assert "private provider response" not in raised.value.safe_message
+
+
+def test_dense_adapter_does_not_degrade_invalid_embedding_response() -> None:
+    class InvalidEmbedder:
+        def embed_query(self, text: str) -> list[float]:
+            raise EmbeddingResponseError("invalid provider payload")
+
+    class UnusedStore:
+        def query_by_vector(self, query_embedding, top_k):
+            raise AssertionError("vector store must not run")
+
+    retriever = DenseRetriever(InvalidEmbedder(), UnusedStore())  # type: ignore[arg-type]
+
+    with pytest.raises(EmbeddingResponseError, match="invalid provider payload"):
+        retriever.retrieve("query")
 
 
 def test_known_bm25_failure_degrades_to_dense_and_is_observable() -> None:
     dense = FakeRetriever([_hit("semantic", dense_score=0.8)])
-    bm25 = FakeRetriever(error=EmbeddingRequestError("synthetic known error"))
+    bm25 = FakeRetriever(error=BM25RetrievalUnavailableError())
     pipeline = HybridRetrievalPipeline(dense, bm25, settings=_settings())
 
     result = pipeline.retrieve_with_diagnostics("query")
@@ -283,6 +328,25 @@ def test_known_bm25_failure_degrades_to_dense_and_is_observable() -> None:
 
     assert [hit.chunk_id for hit in hits] == ["semantic"]
     assert result.diagnostics.degraded_sources == ("bm25",)
+    assert result.diagnostics.mode == "dense"
+
+
+def test_two_recoverable_path_failures_raise_stable_overall_error() -> None:
+    pipeline = HybridRetrievalPipeline(
+        FakeRetriever(error=DenseRetrievalUnavailableError()),
+        FakeRetriever(error=BM25RetrievalUnavailableError()),
+        settings=_settings(),
+    )
+
+    with pytest.raises(RetrievalUnavailableError) as raised:
+        pipeline.retrieve("query")
+
+    assert raised.value.code == "retrieval_unavailable"
+    assert raised.value.path == "hybrid"
+    assert raised.value.recoverable is True
+    assert raised.value.safe_message == (
+        "Document retrieval is temporarily unavailable."
+    )
 
 
 def test_programming_errors_are_not_swallowed() -> None:

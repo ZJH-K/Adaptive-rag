@@ -6,6 +6,7 @@ from typing import Annotated, Any, TypedDict
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from src.agent.failures import WorkflowFailure, WorkflowStage
+from src.observability.tracing import TracingStatus
 from src.rag.context_builder import ContextSource
 from src.rag.retrieval.pipeline import RetrievalDiagnostics
 from src.rag.schemas import SearchHit
@@ -39,7 +40,9 @@ class AgentState(TypedDict, total=False):
     fatal_error: WorkflowFailure | None
     answer_available: bool
 
-    trace_id: str
+    request_id: str
+    trace_id: str | None
+    tracing_status: TracingStatus
 
 
 class RouteDecision(BaseModel):

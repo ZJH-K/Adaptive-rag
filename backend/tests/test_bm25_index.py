@@ -171,3 +171,45 @@ def test_rebuild_publishes_one_complete_snapshot() -> None:
     assert during.chunk_ids == ("old",)
     assert after.chunk_ids == ("new",)
     assert after.generation == before.generation + 1
+
+
+def test_slower_older_rebuild_cannot_publish_after_newer_rebuild() -> None:
+    old_build_started = Event()
+    allow_old_build = Event()
+    new_worker_started = Event()
+
+    class BlockingOldTokenizer(WhitespaceTokenizer):
+        def tokenize(self, text: str) -> list[str]:
+            if text == "old slow corpus":
+                old_build_started.set()
+                assert allow_old_build.wait(timeout=5)
+            return super().tokenize(text)
+
+    index = BM25Index(tokenizer=BlockingOldTokenizer())
+    old_worker = Thread(
+        target=index.rebuild,
+        args=([_chunk("old", "old slow corpus")],),
+    )
+
+    def rebuild_new() -> None:
+        new_worker_started.set()
+        index.rebuild([_chunk("new", "new corpus")])
+
+    new_worker = Thread(target=rebuild_new)
+    old_worker.start()
+    assert old_build_started.wait(timeout=5)
+    assert index.status().is_rebuilding is True
+    new_worker.start()
+    assert new_worker_started.wait(timeout=5)
+    allow_old_build.set()
+    old_worker.join(timeout=5)
+    new_worker.join(timeout=5)
+
+    assert index.chunk_ids == ("new",)
+    assert index.generation == 2
+    status = index.status()
+    assert status.chunk_count == 1
+    assert status.needs_rebuild is False
+    assert status.last_successful_rebuild_at is not None
+    assert status.last_failure_code is None
+    assert status.is_rebuilding is False

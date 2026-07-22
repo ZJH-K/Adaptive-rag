@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, TypeVar
+import inspect
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any, AsyncIterator, Literal, Protocol, TypeVar
 
-from openai import APITimeoutError, OpenAI
+from openai import APITimeoutError, AsyncOpenAI, OpenAI
 from pydantic import BaseModel, ValidationError
 
 from src.config import Settings
@@ -40,6 +41,7 @@ class ChatCompletionsResource(Protocol):
         messages: list[dict[str, str]],
         temperature: float,
         response_format: dict[str, str] | None = None,
+        stream: bool = False,
     ) -> Any:
         """Create one non-streaming chat completion."""
         ...
@@ -71,6 +73,7 @@ class DeepSeekClient:
         temperature: float | None = None,
         json_mode_enabled: bool | None = None,
         api_client: LLMAPIClient | None = None,
+        async_api_client: Any | None = None,
     ) -> None:
         """Initialize configuration without making a network request."""
         configured = settings or Settings()
@@ -91,6 +94,7 @@ class DeepSeekClient:
             else json_mode_enabled
         )
         self._api_client = api_client
+        self._async_api_client = async_api_client
         self._validate_configuration()
 
     def generate(
@@ -111,6 +115,102 @@ class DeepSeekClient:
         )
         text = self._request_text(messages, response_format=response_format)
         return parse_structured_output(text, response_model)
+
+    def stream_generate(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+    ) -> Iterator[str]:
+        """Yield provider-supplied text deltas from a real streaming request."""
+        normalized_messages = self._normalize_messages(messages)
+        client = self._get_api_client()
+        try:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=normalized_messages,
+                temperature=float(self.temperature),
+                stream=True,
+            )
+        except (APITimeoutError, TimeoutError) as exc:
+            raise LLMTimeoutError("LLM streaming request timed out") from exc
+        except Exception as exc:
+            detail = self._safe_request_detail(exc)
+            raise LLMRequestError(
+                f"LLM streaming request failed ({detail})"
+            ) from exc
+
+        emitted = False
+        close = getattr(response, "close", None)
+        try:
+            for chunk in response:
+                content = self._extract_stream_delta(chunk)
+                if content is None:
+                    continue
+                emitted = True
+                yield content
+        except (LLMResponseError, LLMTimeoutError, LLMRequestError):
+            raise
+        except (APITimeoutError, TimeoutError) as exc:
+            raise LLMTimeoutError("LLM stream timed out") from exc
+        except Exception as exc:
+            detail = self._safe_request_detail(exc)
+            raise LLMRequestError(f"LLM stream failed ({detail})") from exc
+        finally:
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        if not emitted:
+            raise LLMResponseError("LLM stream contains no assistant text")
+
+    async def astream_generate(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, object]],
+    ) -> AsyncIterator[str]:
+        """Yield provider deltas asynchronously so cancellation closes upstream."""
+        normalized_messages = self._normalize_messages(messages)
+        client = self._get_async_api_client()
+        try:
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=normalized_messages,
+                temperature=float(self.temperature),
+                stream=True,
+            )
+        except (APITimeoutError, TimeoutError) as exc:
+            raise LLMTimeoutError("LLM streaming request timed out") from exc
+        except Exception as exc:
+            detail = self._safe_request_detail(exc)
+            raise LLMRequestError(
+                f"LLM streaming request failed ({detail})"
+            ) from exc
+
+        emitted = False
+        close = getattr(response, "close", None)
+        try:
+            async for chunk in response:
+                content = self._extract_stream_delta(chunk)
+                if content is None:
+                    continue
+                emitted = True
+                yield content
+        except (LLMResponseError, LLMTimeoutError, LLMRequestError):
+            raise
+        except (APITimeoutError, TimeoutError) as exc:
+            raise LLMTimeoutError("LLM stream timed out") from exc
+        except Exception as exc:
+            detail = self._safe_request_detail(exc)
+            raise LLMRequestError(f"LLM stream failed ({detail})") from exc
+        finally:
+            if callable(close):
+                try:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    pass
+        if not emitted:
+            raise LLMResponseError("LLM stream contains no assistant text")
 
     def _request_text(
         self,
@@ -174,6 +274,19 @@ class DeepSeekClient:
             )
         return self._api_client
 
+    def _get_async_api_client(self) -> Any:
+        """Validate the API key and lazily construct the async SDK client."""
+        if not isinstance(self.api_key, str) or not self.api_key.strip():
+            raise LLMConfigurationError("LLM API key is required")
+        if self._async_api_client is None:
+            self._async_api_client = AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=float(self.timeout_seconds),
+                max_retries=0,
+            )
+        return self._async_api_client
+
     @staticmethod
     def _normalize_messages(
         messages: Sequence[ChatMessage | Mapping[str, object]],
@@ -218,6 +331,24 @@ class DeepSeekClient:
         if not isinstance(content, str) or not content.strip():
             raise LLMResponseError("LLM response contains no assistant text")
         return content.strip()
+
+    @staticmethod
+    def _extract_stream_delta(chunk: object) -> str | None:
+        """Extract one optional text delta from an SDK stream chunk."""
+        choices = getattr(chunk, "choices", None)
+        if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)):
+            raise LLMResponseError("LLM stream chunk has no valid choices list")
+        if not choices:
+            return None
+        delta = getattr(choices[0], "delta", None)
+        content = getattr(delta, "content", None)
+        if content is None or content == "":
+            return None
+        if not isinstance(content, str):
+            raise LLMResponseError(
+                "LLM stream delta contains invalid assistant text"
+            )
+        return content
 
     @staticmethod
     def _safe_request_detail(exc: Exception) -> str:

@@ -37,7 +37,9 @@ def test_agent_state_matches_the_workflow_contract() -> None:
         "degradation_events",
         "fatal_error",
         "answer_available",
-        "trace_id",
+            "trace_id",
+            "request_id",
+            "tracing_status",
     }
     assert annotations["retrieved_documents"] == list[SearchHit]
     assert annotations["context_sources"] == list[ContextSource]

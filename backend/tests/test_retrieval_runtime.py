@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.config import Settings
 from src.rag.runtime import build_retrieval_runtime
 from src.rag.schemas import Chunk, SearchHit
@@ -119,3 +121,69 @@ def test_runtime_uses_settings_as_authoritative_candidate_limits(
         assert runtime.retriever.dense_top_n == 7
         assert runtime.retriever.bm25_top_n == 8
         assert runtime.retriever.retrieve_top_n == 4
+
+
+def test_partial_ingestion_status_recovers_from_store_and_enables_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_path = tmp_path / "recover.md"
+    document_path.write_text("recoverable_unique_term", encoding="utf-8")
+    settings = Settings(
+        _env_file=None,
+        chroma_persist_dir=tmp_path / "chroma",
+        chroma_collection="runtime_recovery",
+        reranker_enabled=False,
+    )
+
+    with build_retrieval_runtime(
+        FakeEmbeddingClient(),
+        settings=settings,
+    ) as runtime:
+        original_rebuild = runtime.bm25_index.rebuild
+
+        def fail_rebuild(_chunks: object) -> None:
+            raise OSError("synthetic rebuild failure")
+
+        monkeypatch.setattr(runtime.bm25_index, "rebuild", fail_rebuild)
+        partial = runtime.ingestion_pipeline.ingest(document_path)
+
+        assert partial.status == "partial"
+        assert runtime.get_index_status().needs_rebuild is True
+        assert runtime.get_index_status().last_failure_code == (
+            "bm25_rebuild_failed"
+        )
+        degraded = runtime.retriever.retrieve_with_diagnostics(
+            "recoverable_unique_term"
+        )
+        assert degraded.diagnostics.mode == "dense"
+        assert degraded.diagnostics.degraded_sources == ("bm25",)
+        assert degraded.diagnostics.degradation_codes == (
+            "bm25_index_stale",
+        )
+
+        monkeypatch.setattr(runtime.bm25_index, "rebuild", original_rebuild)
+        recovered = runtime.rebuild_from_store()
+        hits = runtime.bm25_retriever.retrieve("recoverable_unique_term")
+
+        assert recovered.needs_rebuild is False
+        assert recovered.chunk_count == runtime.vector_store.count() == 1
+        assert recovered.last_failure_code is None
+        assert hits
+
+
+def test_runtime_exposes_one_shared_consistency_lock(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        chroma_persist_dir=tmp_path / "chroma",
+        chroma_collection="runtime_lock",
+        reranker_enabled=False,
+    )
+
+    with build_retrieval_runtime(
+        FakeEmbeddingClient(),
+        settings=settings,
+    ) as runtime:
+        assert runtime.ingestion_pipeline._consistency_lock is (
+            runtime._consistency_lock
+        )

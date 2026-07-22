@@ -24,6 +24,7 @@ from src.llm.client import ChatMessage
 from src.llm.exceptions import LLMError
 from src.observability.tracing import TraceObserver
 from src.rag.context_builder import ContextBuilder, ContextBuilderError
+from src.rag.retrieval.exceptions import RetrievalUnavailableError
 from src.rag.service import (
     NO_EVIDENCE_ANSWER,
     ContextConstructor,
@@ -68,10 +69,14 @@ def route_query(
     """Classify a question and return only the routing state fields."""
 
     question = _require_question(state)
-    trace_id = _trace_id(state, observer)
+    request_id = _request_id(state, observer)
     history = bounded_chat_history(state.get("chat_history"))
     prompt = format_router_prompt(question, history)
     started = perf_counter()
+    observation = _begin(
+        observer, request_id, "router", "generation",
+        input={"question": question, "history_messages": len(history)},
+    )
     try:
         decision = llm_client.generate_structured(
             [ChatMessage(role="user", content=prompt)],
@@ -88,7 +93,8 @@ def route_query(
             ),
             "current_stage": "router",
             "answer_available": False,
-            "trace_id": trace_id,
+            "request_id": request_id,
+            **_tracing_fields(observer, request_id),
             "degradation_events": [
                 _failure(
                     stage="router",
@@ -105,7 +111,8 @@ def route_query(
         }
         _record(
             observer,
-            trace_id=trace_id,
+            token=observation,
+            request_id=request_id,
             name="router",
             kind="generation",
             input={"question": question, "history_messages": len(history)},
@@ -129,11 +136,13 @@ def route_query(
         "route_reason": decision.reason,
         "current_stage": "router",
         "answer_available": False,
-        "trace_id": trace_id,
+        "request_id": request_id,
+        **_tracing_fields(observer, request_id),
     }
     _record(
         observer,
-        trace_id=trace_id,
+        token=observation,
+        request_id=request_id,
         name="router",
         kind="generation",
         input={"question": question, "history_messages": len(history)},
@@ -154,15 +163,14 @@ def direct_answer(
     """Answer a general question without accessing retrieval context."""
 
     question = _require_question(state)
-    trace_id = _trace_id(state, observer)
+    request_id = _request_id(state, observer)
     history = bounded_chat_history(state.get("chat_history"))
-    messages = [ChatMessage(role="system", content=DIRECT_ANSWER_PROMPT)]
-    messages.extend(
-        ChatMessage(role=item["role"], content=item["content"])
-        for item in history
-    )
-    messages.append(ChatMessage(role="user", content=question))
+    messages = build_direct_answer_messages(question, history)
     started = perf_counter()
+    observation = _begin(
+        observer, request_id, "direct_answer", "generation",
+        input={"question": question, "history_messages": len(history)},
+    )
     try:
         answer = llm_client.generate(messages)
     except LLMError as exc:
@@ -183,34 +191,36 @@ def direct_answer(
             "current_stage": "direct_answer",
             "fatal_error": failure,
             "answer_available": True,
-            "trace_id": trace_id,
+            "request_id": request_id,
         }
         _record_terminal_answer(
             observer,
-            trace_id,
+            request_id,
             "direct_answer",
             question,
             SAFE_WORKFLOW_ERROR_ANSWER,
             len(history),
             failure,
+            observation=observation,
         )
         return result
     result = {
         "answer": answer,
         "current_stage": "direct_answer",
         "answer_available": True,
-        "trace_id": trace_id,
+        "request_id": request_id,
     }
     _record(
         observer,
-        trace_id=trace_id,
+        token=observation,
+        request_id=request_id,
         name="direct_answer",
         kind="generation",
         input={"question": question, "history_messages": len(history)},
         output={"answer": answer},
         metadata={"duration_ms": _elapsed_ms(started), "degraded": False},
     )
-    _finish(observer, trace_id, result)
+    _finish(observer, request_id, result)
     return result
 
 
@@ -222,10 +232,14 @@ def rewrite_query(
     """Rewrite a contextual question as one standalone retrieval query."""
 
     question = _require_question(state)
-    trace_id = _trace_id(state, observer)
+    request_id = _request_id(state, observer)
     history = bounded_chat_history(state.get("chat_history"))
     prompt = format_query_rewrite_prompt(question, history)
     started = perf_counter()
+    observation = _begin(
+        observer, request_id, "query_rewrite", "generation",
+        input={"question": question, "history_messages": len(history)},
+    )
     try:
         result = llm_client.generate_structured(
             [ChatMessage(role="user", content=prompt)],
@@ -237,7 +251,7 @@ def rewrite_query(
             "rewritten_query": question,
             "current_stage": "rewrite",
             "answer_available": False,
-            "trace_id": trace_id,
+            "request_id": request_id,
             "degradation_events": [
                 _failure(
                     stage="rewrite",
@@ -254,7 +268,8 @@ def rewrite_query(
         }
         _record(
             observer,
-            trace_id=trace_id,
+            token=observation,
+            request_id=request_id,
             name="query_rewrite",
             kind="generation",
             input={"question": question, "history_messages": len(history)},
@@ -274,11 +289,12 @@ def rewrite_query(
         "rewritten_query": result.rewritten_query,
         "current_stage": "rewrite",
         "answer_available": False,
-        "trace_id": trace_id,
+        "request_id": request_id,
     }
     _record(
         observer,
-        trace_id=trace_id,
+        token=observation,
+        request_id=request_id,
         name="query_rewrite",
         kind="generation",
         input={"question": question, "history_messages": len(history)},
@@ -293,11 +309,12 @@ def retrieve(
     retriever: Retriever,
     context_builder: ContextConstructor | None = None,
     observer: TraceObserver | None = None,
+    finalize_request: bool = True,
 ) -> AgentState:
     """Retrieve dense hits and build bounded citation-aware context."""
 
     question = _require_question(state)
-    trace_id = _trace_id(state, observer)
+    request_id = _request_id(state, observer)
     rewritten_query = state.get("rewritten_query")
     query = (
         rewritten_query.strip()
@@ -305,17 +322,79 @@ def retrieve(
         else question
     )
 
-    hits, retrieval_diagnostics = execute_retrieval(retriever, query)
+    retrieval_started = perf_counter()
+    retrieval_observations = _begin_retrieval_observations(
+        observer, request_id, query, retriever
+    )
+    try:
+        hits, retrieval_diagnostics = execute_retrieval(retriever, query)
+    except RetrievalUnavailableError as exc:
+        for stage_observation in retrieval_observations.values():
+            if stage_observation is not None and observer is not None:
+                try:
+                    observer.finish_observation(
+                        stage_observation,
+                        level="ERROR",
+                        status_message=exc.code,
+                        outcome="failure",
+                    )
+                except Exception:
+                    pass
+        failure = _failure(
+            stage="retrieval",
+            error_type=exc.code,
+            safe_message=exc.safe_message,
+            degraded=False,
+            fatal=True,
+            fallback="safe_error_answer",
+            duration_ms=_elapsed_ms(retrieval_started),
+            provider="retrieval",
+            code=exc.code,
+        )
+        result: AgentState = {
+            "retrieved_documents": [],
+            "context": "",
+            "context_sources": [],
+            "context_chunk_ids": [],
+            "answer": SAFE_WORKFLOW_ERROR_ANSWER,
+            "current_stage": "retrieval",
+            "fatal_error": failure,
+            "answer_available": True,
+            "request_id": request_id,
+        }
+        _record(
+            observer,
+            request_id=request_id,
+            name="retrieval",
+            kind="span",
+            input={"query": query},
+            output={"retrieved_chunk_ids": []},
+            metadata={
+                "duration_ms": failure.duration_ms,
+                "fatal": True,
+                "error_type": failure.error_type,
+            },
+            level="ERROR",
+            status_message=exc.code,
+        )
+        if finalize_request:
+            _finish(observer, request_id, result)
+        return result
     degradation_events = _retrieval_failures(retrieval_diagnostics)
     _record_retrieval_observations(
         observer,
-        trace_id,
+        request_id,
         query,
         hits,
         retrieval_diagnostics,
         degradation_events,
+        retrieval_observations,
     )
     context_started = perf_counter()
+    context_observation = _begin(
+        observer, request_id, "context_build", "span",
+        input={"retrieved_chunk_ids": [hit.chunk_id for hit in hits]},
+    )
     try:
         context_result = (context_builder or ContextBuilder()).build(hits)
     except ContextBuilderError:
@@ -339,7 +418,7 @@ def retrieve(
             "current_stage": "context",
             "fatal_error": failure,
             "answer_available": True,
-            "trace_id": trace_id,
+            "request_id": request_id,
         }
         if degradation_events:
             result["degradation_events"] = degradation_events
@@ -347,7 +426,8 @@ def retrieve(
             result["retrieval_diagnostics"] = retrieval_diagnostics
         _record(
             observer,
-            trace_id=trace_id,
+            token=context_observation,
+            request_id=request_id,
             name="context_build",
             kind="span",
             input={"retrieved_chunk_ids": [hit.chunk_id for hit in hits]},
@@ -361,7 +441,8 @@ def retrieve(
             level="ERROR",
             status_message="context_build_failed",
         )
-        _finish(observer, trace_id, result)
+        if finalize_request:
+            _finish(observer, request_id, result)
         return result
 
     result: AgentState = {
@@ -371,7 +452,7 @@ def retrieve(
         "context_chunk_ids": context_result.used_chunk_ids,
         "current_stage": "context",
         "answer_available": False,
-        "trace_id": trace_id,
+        "request_id": request_id,
     }
     if degradation_events:
         result["degradation_events"] = degradation_events
@@ -379,7 +460,8 @@ def retrieve(
         result["retrieval_diagnostics"] = retrieval_diagnostics
     _record(
         observer,
-        trace_id=trace_id,
+        token=context_observation,
+        request_id=request_id,
         name="context_build",
         kind="span",
         input={"retrieved_chunk_ids": [hit.chunk_id for hit in hits]},
@@ -400,7 +482,7 @@ def generate_answer(
     """Generate one grounded answer without performing another retrieval."""
 
     question = _require_question(state)
-    trace_id = _trace_id(state, observer)
+    request_id = _request_id(state, observer)
     context = state.get("context")
     retrieved_documents = state.get("retrieved_documents", [])
     if (
@@ -412,11 +494,11 @@ def generate_answer(
             "answer": NO_EVIDENCE_ANSWER,
             "current_stage": "generation",
             "answer_available": True,
-            "trace_id": trace_id,
+            "request_id": request_id,
         }
         _record(
             observer,
-            trace_id=trace_id,
+            request_id=request_id,
             name="final_answer",
             kind="generation",
             input={
@@ -426,10 +508,17 @@ def generate_answer(
             output={"answer": NO_EVIDENCE_ANSWER, "sources": []},
             metadata={"skipped": True, "reason": "no_evidence"},
         )
-        _finish(observer, trace_id, result)
+        _finish(observer, request_id, result)
         return result
 
     started = perf_counter()
+    observation = _begin(
+        observer, request_id, "final_answer", "generation",
+        input={
+            "question": question,
+            "context_chunk_ids": state.get("context_chunk_ids", []),
+        },
+    )
     try:
         answer = llm_client.generate(build_rag_messages(question, context))
     except LLMError as exc:
@@ -450,16 +539,17 @@ def generate_answer(
             "current_stage": "generation",
             "fatal_error": failure,
             "answer_available": True,
-            "trace_id": trace_id,
+            "request_id": request_id,
         }
         _record_terminal_answer(
             observer,
-            trace_id,
+            request_id,
             "final_answer",
             question,
             SAFE_WORKFLOW_ERROR_ANSWER,
             None,
             failure,
+            observation=observation,
             context_chunk_ids=state.get("context_chunk_ids", []),
             sources=state.get("context_sources", []),
         )
@@ -468,11 +558,12 @@ def generate_answer(
         "answer": answer,
         "current_stage": "generation",
         "answer_available": True,
-        "trace_id": trace_id,
+        "request_id": request_id,
     }
     _record(
         observer,
-        trace_id=trace_id,
+        token=observation,
+        request_id=request_id,
         name="final_answer",
         kind="generation",
         input={
@@ -485,7 +576,7 @@ def generate_answer(
         },
         metadata={"duration_ms": _elapsed_ms(started), "fatal": False},
     )
-    _finish(observer, trace_id, result)
+    _finish(observer, request_id, result)
     return result
 
 
@@ -518,13 +609,28 @@ def bounded_chat_history(history: object) -> list[dict[str, str]]:
     return selected
 
 
+def build_direct_answer_messages(
+    question: str,
+    history: list[dict[str, str]],
+) -> list[ChatMessage]:
+    """Build the shared direct-answer messages for sync and stream runners."""
+    messages = [ChatMessage(role="system", content=DIRECT_ANSWER_PROMPT)]
+    messages.extend(
+        ChatMessage(role=item["role"], content=item["content"])
+        for item in history
+    )
+    messages.append(ChatMessage(role="user", content=question))
+    return messages
+
+
 def _record_retrieval_observations(
     observer: TraceObserver | None,
-    trace_id: str,
+    request_id: str,
     query: str,
     hits: list[Any],
     diagnostics: object,
     failures: list[WorkflowFailure],
+    observations: dict[str, Any],
 ) -> None:
     """Emit ordered retrieval observations from this request's result only."""
 
@@ -612,6 +718,20 @@ def _record_retrieval_observations(
         ),
     ]
     for name, stage_hits, count, failure, skipped in stages:
+        if (
+            name == "rerank"
+            and (
+                not reranker_enabled
+                or (diagnostics is not None and not diagnostics.rerank_entered)
+            )
+        ):
+            continue
+        if (
+            name == "rrf_fusion"
+            and diagnostics is not None
+            and not diagnostics.rrf_entered
+        ):
+            continue
         metadata: dict[str, Any] = {
             "count": count,
             "duration_ms": timings[name],
@@ -635,7 +755,8 @@ def _record_retrieval_observations(
             )
         _record(
             observer,
-            trace_id=trace_id,
+            token=observations.get(name),
+            request_id=request_id,
             name=name,
             kind="span" if name != "rerank" else "generation",
             input={"query": query},
@@ -671,13 +792,14 @@ def _source_payload(sources: object) -> list[dict[str, Any]]:
 
 def _record_terminal_answer(
     observer: TraceObserver | None,
-    trace_id: str,
+    request_id: str,
     name: str,
     question: str,
     answer: str,
     history_messages: int | None,
     failure: WorkflowFailure,
     *,
+    observation: Any = None,
     context_chunk_ids: object = None,
     sources: object = None,
 ) -> None:
@@ -691,11 +813,12 @@ def _record_terminal_answer(
         "current_stage": failure.stage,
         "fatal_error": failure,
         "answer_available": True,
-        "trace_id": trace_id,
+        "request_id": request_id,
     }
     _record(
         observer,
-        trace_id=trace_id,
+        token=observation,
+        request_id=request_id,
         name=name,
         kind="generation",
         input=input_payload,
@@ -709,31 +832,39 @@ def _record_terminal_answer(
         level="ERROR",
         status_message="fatal",
     )
-    _finish(observer, trace_id, result)
+    _finish(observer, request_id, result)
 
 
-def _trace_id(state: AgentState, observer: TraceObserver | None) -> str:
-    existing = state.get("trace_id")
-    if _is_trace_id(existing):
+def _request_id(state: AgentState, observer: TraceObserver | None) -> str:
+    """Return the local correlation ID, starting one root request if needed."""
+    existing = state.get("request_id")
+    if isinstance(existing, str) and existing.strip():
         return existing
     if observer is not None:
         try:
-            created = observer.create_trace()
-            if _is_trace_id(created):
-                return created
+            status = observer.start_request()
+            if status.request_id is not None:
+                return status.request_id
         except Exception:
             pass
     return uuid4().hex
 
 
-def _is_trace_id(value: object) -> bool:
-    if not isinstance(value, str) or len(value) != 32:
-        return False
+def _tracing_fields(
+    observer: TraceObserver | None,
+    request_id: str,
+) -> dict[str, Any]:
+    """Return provider identity separately from the local request ID."""
+    if observer is None:
+        return {}
     try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
+        status = observer.get_status(request_id)
+    except Exception:
+        return {}
+    fields: dict[str, Any] = {"tracing_status": status}
+    if status.trace_id is not None:
+        fields["trace_id"] = status.trace_id
+    return fields
 
 
 def _record(
@@ -743,22 +874,75 @@ def _record(
     if observer is None:
         return
     try:
-        observer.record(**kwargs)
+        token = kwargs.pop("token", None)
+        if token is None:
+            observer.record(**kwargs)
+            return
+        kwargs.pop("request_id", None)
+        kwargs.pop("name", None)
+        kwargs.pop("kind", None)
+        kwargs.pop("input", None)
+        if kwargs.get("level") == "ERROR" and "outcome" not in kwargs:
+            kwargs["outcome"] = "failure"
+        observer.finish_observation(token, **kwargs)
     except Exception:
         return
 
 
+def _begin(
+    observer: TraceObserver | None,
+    request_id: str,
+    name: str,
+    kind: str,
+    *,
+    input: dict[str, Any] | None = None,
+) -> Any:
+    if observer is None:
+        return None
+    try:
+        return observer.start_observation(
+            request_id=request_id,
+            name=name,
+            kind=kind,
+            input=input,
+        )
+    except Exception:
+        return None
+
+
+def _begin_retrieval_observations(
+    observer: TraceObserver | None,
+    request_id: str,
+    query: str,
+    retriever: object,
+) -> dict[str, Any]:
+    """Open configured retrieval stages before the retrieval call starts."""
+    names = ["dense_retrieval"]
+    if getattr(retriever, "hybrid_enabled", True):
+        names.extend(["bm25_retrieval", "rrf_fusion"])
+    return {
+        name: _begin(
+            observer,
+            request_id,
+            name,
+            "generation" if name == "rerank" else "span",
+            input={"query": query},
+        )
+        for name in names
+    }
+
+
 def _finish(
     observer: TraceObserver | None,
-    trace_id: str,
+    request_id: str,
     state: AgentState,
 ) -> None:
     if observer is None:
         return
     fatal_error = state.get("fatal_error")
     try:
-        observer.finish_trace(
-            trace_id,
+        status = observer.finish_request(
+            request_id,
             output={
                 "answer": state.get("answer"),
                 "answer_available": state.get("answer_available", False),
@@ -767,7 +951,11 @@ def _finish(
                 "fatal": fatal_error is not None,
                 "current_stage": state.get("current_stage"),
             },
+            outcome="failure" if fatal_error is not None else "success",
         )
+        state["tracing_status"] = status
+        if status.trace_id is not None:
+            state["trace_id"] = status.trace_id
     except Exception:
         return
 
@@ -778,7 +966,17 @@ def _retrieval_failures(diagnostics: object) -> list[WorkflowFailure]:
     if diagnostics is None:
         return []
     failures: list[WorkflowFailure] = []
-    for source in diagnostics.degraded_sources:
+    path_codes = [
+        code
+        for code in diagnostics.degradation_codes
+        if not code.startswith("reranker_")
+    ]
+    for index, source in enumerate(diagnostics.degraded_sources):
+        code = (
+            path_codes[index]
+            if index < len(path_codes)
+            else f"{source}_retrieval_failed"
+        )
         other_count = (
             diagnostics.bm25_count
             if source == "dense"
@@ -793,14 +991,14 @@ def _retrieval_failures(diagnostics: object) -> list[WorkflowFailure]:
         failures.append(
             _failure(
                 stage="retrieval",
-                error_type=f"{source}_retrieval_failed",
+                error_type=code,
                 safe_message=f"{source.upper()} retrieval path failed.",
                 degraded=True,
                 fatal=False,
                 fallback=fallback,
                 duration_ms=latency,
                 provider=source,
-                code=f"{source}_retrieval_failed",
+                code=code,
             )
         )
     rerank_code = next(

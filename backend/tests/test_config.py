@@ -20,7 +20,7 @@ def test_settings_use_expected_defaults() -> None:
     assert settings.llm_timeout_seconds == 60.0
     assert settings.llm_temperature == 0.1
     assert settings.llm_json_mode_enabled is True
-    assert settings.reranker_enabled is True
+    assert settings.reranker_enabled is False
     assert settings.reranker_base_url == "https://api.siliconflow.cn/v1"
     assert settings.reranker_api_key is None
     assert isinstance(settings.reranker_model, str) and settings.reranker_model
@@ -41,6 +41,10 @@ def test_settings_use_expected_defaults() -> None:
     assert settings.langfuse_max_text_chars == 200
     assert settings.chroma_persist_dir == Path("./data/chroma")
     assert settings.chroma_collection == "technical_docs"
+    assert settings.knowledge_base_id == "technical_docs"
+    assert settings.knowledge_root.name == "knowledge"
+    assert settings.upload_max_bytes == 10 * 1024 * 1024
+    assert settings.upload_temp_dir is None
 
 
 def test_environment_variables_override_defaults(monkeypatch) -> None:
@@ -75,6 +79,10 @@ def test_environment_variables_override_defaults(monkeypatch) -> None:
     monkeypatch.setenv("LANGFUSE_MAX_TEXT_CHARS", "500")
     monkeypatch.setenv("CHROMA_PERSIST_DIR", "./tmp/chroma")
     monkeypatch.setenv("CHROMA_COLLECTION", "test_docs")
+    monkeypatch.setenv("KNOWLEDGE_BASE_ID", "test_kb")
+    monkeypatch.setenv("KNOWLEDGE_ROOT", "./fixtures/knowledge")
+    monkeypatch.setenv("UPLOAD_MAX_BYTES", "2048")
+    monkeypatch.setenv("UPLOAD_TEMP_DIR", "./tmp/uploads")
 
     settings = Settings(_env_file=None)
 
@@ -109,6 +117,10 @@ def test_environment_variables_override_defaults(monkeypatch) -> None:
     assert settings.langfuse_max_text_chars == 500
     assert settings.chroma_persist_dir == Path("./tmp/chroma")
     assert settings.chroma_collection == "test_docs"
+    assert settings.knowledge_base_id == "test_kb"
+    assert settings.knowledge_root == Path("./fixtures/knowledge")
+    assert settings.upload_max_bytes == 2048
+    assert settings.upload_temp_dir == Path("./tmp/uploads")
 
 
 @pytest.mark.parametrize(
@@ -119,6 +131,7 @@ def test_environment_variables_override_defaults(monkeypatch) -> None:
         "retrieve_top_n",
         "rrf_k",
         "rerank_top_k",
+        "upload_max_bytes",
     ],
 )
 def test_retrieval_integer_settings_must_be_positive(field: str) -> None:

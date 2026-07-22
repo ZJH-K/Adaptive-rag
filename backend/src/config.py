@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     llm_json_mode_enabled: bool = True
 
-    reranker_enabled: bool = True
+    reranker_enabled: bool = False
     reranker_base_url: str = "https://api.siliconflow.cn/v1"
     reranker_api_key: str | None = None
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -66,3 +66,8 @@ class Settings(BaseSettings):
 
     chroma_persist_dir: Path = Path("./data/chroma")
     chroma_collection: str = "technical_docs"
+
+    knowledge_base_id: str = Field(default="technical_docs", min_length=1)
+    knowledge_root: Path = PROJECT_ROOT / "knowledge"
+    upload_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    upload_temp_dir: Path | None = None

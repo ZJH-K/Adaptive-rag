@@ -22,10 +22,13 @@ from src.agent.state import RewriteResult, RouteDecision
 from src.llm.client import ChatMessage
 from src.llm.exceptions import LLMResponseError, LLMTimeoutError
 from src.rag.context_builder import ContextBuildError
-from src.rag.embeddings.exceptions import EmbeddingRequestError
-from src.rag.retrieval import HybridRetrievalPipeline, RerankerRequestError
+from src.rag.retrieval import (
+    BM25RetrievalUnavailableError,
+    DenseRetrievalUnavailableError,
+    HybridRetrievalPipeline,
+    RerankerRequestError,
+)
 from src.rag.schemas import SearchHit
-from src.rag.service import NO_EVIDENCE_ANSWER
 
 
 StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
@@ -75,13 +78,18 @@ class FailureLLM:
 class PathRetriever:
     """Return one path result or emulate a recognized external request failure."""
 
-    def __init__(self, hits: list[SearchHit], *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        hits: list[SearchHit],
+        *,
+        failure: Exception | None = None,
+    ) -> None:
         self.hits = hits
-        self.fail = fail
+        self.failure = failure
 
     def retrieve(self, query: str, *, top_n: int | None = None) -> list[SearchHit]:
-        if self.fail:
-            raise EmbeddingRequestError(f"provider failure {SECRET}")
+        if self.failure is not None:
+            raise self.failure
         return list(self.hits if top_n is None else self.hits[:top_n])
 
 
@@ -116,8 +124,22 @@ def _pipeline(
     reranker_fail: bool = False,
 ) -> HybridRetrievalPipeline:
     return HybridRetrievalPipeline(
-        PathRetriever([_hit("dense", source="dense")], fail=dense_fail),
-        PathRetriever([_hit("bm25", source="bm25")], fail=bm25_fail),
+        PathRetriever(
+            [_hit("dense", source="dense")],
+            failure=(
+                DenseRetrievalUnavailableError()
+                if dense_fail
+                else None
+            ),
+        ),
+        PathRetriever(
+            [_hit("bm25", source="bm25")],
+            failure=(
+                BM25RetrievalUnavailableError()
+                if bm25_fail
+                else None
+            ),
+        ),
         reranker=FailedReranker() if reranker_fail else None,
         hybrid_enabled=True,
         reranker_enabled=reranker_fail,
@@ -163,12 +185,12 @@ def test_single_retrieval_path_failure_uses_the_remaining_path(
 
     assert [hit.chunk_id for hit in result["retrieved_documents"]] == [remaining_id]
     event = result["degradation_events"][0]
-    assert event.error_type == f"{failed_source}_retrieval_failed"
+    assert event.error_type == f"{failed_source}_retrieval_unavailable"
     assert event.fallback == "remaining_retrieval_path"
     assert result["answer_available"] is True
 
 
-def test_both_retrieval_paths_fail_without_context_or_generation() -> None:
+def test_both_retrieval_paths_map_to_stable_fatal_workflow_failure() -> None:
     llm = FailureLLM()
     result = build_graph(
         llm,
@@ -178,12 +200,14 @@ def test_both_retrieval_paths_fail_without_context_or_generation() -> None:
     assert result["retrieved_documents"] == []
     assert result["context"] == ""
     assert result["context_sources"] == []
-    assert result["answer"] == NO_EVIDENCE_ANSWER
+    assert result["answer"] == SAFE_WORKFLOW_ERROR_ANSWER
     assert "generation" not in llm.generated_stages
-    assert [event.stage for event in result["degradation_events"]] == [
-        "retrieval",
-        "retrieval",
-    ]
+    failure = result["fatal_error"]
+    assert failure.stage == "retrieval"
+    assert failure.error_type == "retrieval_unavailable"
+    assert failure.code == "retrieval_unavailable"
+    assert failure.fatal is True
+    assert SECRET not in failure.model_dump_json()
 
 
 def test_reranker_failure_preserves_fused_order_and_records_event() -> None:

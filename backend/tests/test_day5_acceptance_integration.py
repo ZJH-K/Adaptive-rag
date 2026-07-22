@@ -162,6 +162,7 @@ def test_restart_hybrid_rerank_graph_trace_and_sources(tmp_path: Path) -> None:
         assert [
             record.name for record in observer.records_for(result["trace_id"])
         ] == [
+            "chat_request",
             "router",
             "query_rewrite",
             "dense_retrieval",

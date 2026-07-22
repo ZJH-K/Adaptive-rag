@@ -2,10 +2,15 @@
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from src.rag.schemas import Chunk
-from src.rag.vectorstore import ChromaVectorStore, VectorStoreInputError
+from src.rag.vectorstore import (
+    ChromaVectorStore,
+    VectorStoreInputError,
+    VectorStoreUnavailableError,
+)
 
 
 def _chunk(
@@ -184,3 +189,22 @@ def test_invalid_top_k_is_rejected(tmp_path: Path, top_k: int) -> None:
             store.query_by_vector(  # type: ignore[arg-type]
                 [1.0, 0.0], top_k=top_k
             )
+
+
+def test_transport_failure_is_converted_to_safe_vector_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "private-provider-response"
+    with _store(tmp_path / "chroma") as store:
+        def failed_count() -> int:
+            raise httpx.ConnectError(secret)
+
+        monkeypatch.setattr(store, "count", failed_count)
+        with pytest.raises(VectorStoreUnavailableError) as raised:
+            store.query_by_vector([1.0, 0.0], top_k=1)
+
+    assert raised.value.code == "vector_store_unavailable"
+    assert raised.value.path == "vector_store"
+    assert raised.value.recoverable is True
+    assert secret not in raised.value.safe_message

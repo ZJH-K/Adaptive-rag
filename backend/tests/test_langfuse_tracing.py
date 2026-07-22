@@ -20,8 +20,11 @@ from src.observability.tracing import (
     NoOpTraceObserver,
     TracingPolicy,
 )
-from src.rag.embeddings.exceptions import EmbeddingRequestError
-from src.rag.retrieval import HybridRetrievalPipeline, RerankerRequestError
+from src.rag.retrieval import (
+    DenseRetrievalUnavailableError,
+    HybridRetrievalPipeline,
+    RerankerRequestError,
+)
 from src.rag.schemas import SearchHit
 
 
@@ -83,7 +86,7 @@ class FakeRetriever:
         if self.barrier is not None:
             self.barrier.wait(timeout=5)
         if self.fail:
-            raise EmbeddingRequestError(f"retrieval failed {SECRET}")
+            raise DenseRetrievalUnavailableError()
         return list(self.hits if top_n is None else self.hits[:top_n])
 
 
@@ -148,9 +151,11 @@ def test_direct_branch_has_only_router_and_direct_answer() -> None:
     )
 
     records = observer.records_for(result["trace_id"])
-    assert [record.name for record in records] == ["router", "direct_answer"]
+    assert [record.name for record in records] == [
+        "chat_request", "router", "direct_answer"
+    ]
     assert result["trace_id"] in observer.finished_trace_ids
-    assert records[0].input["question"] == "direct question"
+    assert records[1].input["question"] == "direct question"
     assert records[-1].output["answer"] == "direct result"
 
 
@@ -164,6 +169,7 @@ def test_rag_branch_records_complete_topology_and_real_result_data() -> None:
 
     records = observer.records_for(result["trace_id"])
     assert [record.name for record in records] == [
+        "chat_request",
         "router",
         "query_rewrite",
         "dense_retrieval",
@@ -173,33 +179,31 @@ def test_rag_branch_records_complete_topology_and_real_result_data() -> None:
         "context_build",
         "final_answer",
     ]
-    assert records[1].output["rewritten_query"] == "standalone checkpoint query"
-    rerank = records[5]
+    assert records[2].output["rewritten_query"] == "standalone checkpoint query"
+    rerank = records[6]
     assert rerank.metadata["input_count"] == 2
     assert rerank.metadata["output_count"] == 2
     assert rerank.output["retrieved_chunk_ids"] == [
         hit.chunk_id for hit in result["retrieved_documents"]
     ]
     assert rerank.output["hits"][0]["rerank_score"] == 1.0
-    assert records[4].output["retrieved_chunk_ids"] != (
+    assert records[5].output["retrieved_chunk_ids"] != (
         rerank.output["retrieved_chunk_ids"]
     )
-    assert records[6].output["context_chunk_ids"] == result["context_chunk_ids"]
-    assert records[7].output["sources"] == [
+    assert records[7].output["context_chunk_ids"] == result["context_chunk_ids"]
+    assert records[8].output["sources"] == [
         source.model_dump() for source in result["context_sources"]
     ]
 
 
-def test_disabled_reranker_is_an_explicit_skipped_observation() -> None:
+def test_disabled_reranker_does_not_create_observation() -> None:
     observer = _observer()
     result = build_graph(TraceLLM(), _pipeline(), observer=observer).invoke(
         {"question": "document question"}
     )
 
-    rerank = observer.records_for(result["trace_id"])[5]
-    assert rerank.name == "rerank"
-    assert rerank.metadata["enabled"] is False
-    assert rerank.metadata["skipped"] is True
+    names = [record.name for record in observer.records_for(result["trace_id"])]
+    assert "rerank" not in names
 
 
 def test_reranker_failure_and_dense_failure_are_warning_degradations() -> None:
@@ -261,7 +265,7 @@ def test_two_interleaved_requests_keep_trace_data_isolated() -> None:
     for index, trace_id in enumerate(trace_ids):
         records = observer.records_for(trace_id)
         assert len(records) == 8
-        assert records[0].input["question"] == f"document question {index}"
+        assert records[1].input["question"] == f"document question {index}"
         assert {record.trace_id for record in records} == {trace_id}
 
 
@@ -271,14 +275,18 @@ def test_unconfigured_factory_returns_noop() -> None:
     )
 
     assert isinstance(observer, NoOpTraceObserver)
-    assert len(observer.create_trace()) == 32
+    status = observer.start_request()
+    assert status.request_id is not None
+    assert status.trace_id is None
+    assert status.tracing_enabled is False
 
 
 def test_default_redaction_blocks_content_and_credentials() -> None:
     observer = FakeTraceObserver()
-    trace_id = observer.create_trace()
+    status = observer.start_request()
+    assert status.request_id is not None
     observer.record(
-        trace_id=trace_id,
+        request_id=status.request_id,
         name="safe",
         kind="span",
         input={
@@ -307,25 +315,20 @@ class RecordingObservation:
         if self.client.fail_update:
             raise RuntimeError("SDK update failed")
 
-
-class RecordingContext:
-    def __init__(self, client: "RecordingSDKClient") -> None:
-        self.client = client
-
-    def __enter__(self) -> RecordingObservation:
-        self.client.entered += 1
+    def start_observation(self, **kwargs: Any) -> "RecordingObservation":
+        self.client.started += 1
         return RecordingObservation(self.client)
 
-    def __exit__(self, *args: object) -> None:
-        self.client.exited += 1
+    def end(self) -> None:
+        self.client.ended += 1
 
 
 class RecordingSDKClient:
     def __init__(self, *, fail_start: bool = False, fail_update: bool = False) -> None:
         self.fail_start = fail_start
         self.fail_update = fail_update
-        self.entered = 0
-        self.exited = 0
+        self.started = 0
+        self.ended = 0
         self.updated = False
 
     def create_trace_id(self) -> str:
@@ -333,25 +336,37 @@ class RecordingSDKClient:
             raise RuntimeError("SDK ID failed")
         return "a" * 32
 
-    def start_as_current_observation(self, **kwargs: Any) -> RecordingContext:
+    def start_observation(self, **kwargs: Any) -> RecordingObservation:
         if self.fail_start:
             raise RuntimeError("SDK start failed")
-        return RecordingContext(self)
+        self.started += 1
+        return RecordingObservation(self)
+
+    def flush(self) -> None:
+        return
+
+    def shutdown(self) -> None:
+        return
 
 
 def test_langfuse_adapter_closes_span_when_sdk_update_raises() -> None:
     client = RecordingSDKClient(fail_update=True)
     observer = LangfuseTraceObserver(client, environment="test")
 
-    observer.record(
-        trace_id=observer.create_trace(),
+    status = observer.start_request()
+    assert status.request_id is not None
+    token = observer.start_observation(
+        request_id=status.request_id,
         name="failing_sdk",
         kind="span",
-        output={"answer": "safe"},
     )
+    observer.finish_observation(token, output={"answer": "safe"})
 
-    assert client.entered == 1
-    assert client.exited == 1
+    assert client.started == 2
+    assert client.ended == 1
+    assert observer.get_status(status.request_id).trace_error_code == (
+        "trace_observation_finish_failed"
+    )
 
 
 def test_langfuse_sdk_failure_never_changes_workflow_result() -> None:
@@ -364,7 +379,9 @@ def test_langfuse_sdk_failure_never_changes_workflow_result() -> None:
     )
 
     assert result["answer"] == "grounded result [S1]"
-    assert len(result["trace_id"]) == 32
+    assert result["request_id"]
+    assert "trace_id" not in result
+    assert result["tracing_status"].trace_error_code == "trace_creation_failed"
 
 
 def _message_text(
