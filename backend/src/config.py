@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    """Runtime settings for embedding and vector storage services."""
+    """Runtime settings for model and vector storage services."""
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=32, gt=0)
     embedding_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_api_key: str | None = None
+    llm_model: str = "deepseek-chat"
+    llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+
     chroma_persist_dir: Path = Path("./data/chroma")
     chroma_collection: str = "technical_docs"
-

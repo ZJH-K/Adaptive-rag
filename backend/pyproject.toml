@@ -5,6 +5,7 @@ description = "Backend components for the Adaptive RAG project"
 requires-python = ">=3.11"
 dependencies = [
     "chromadb>=1.0,<2",
+    "langgraph>=0.3,<2",
     "openai>=1.0,<3",
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",

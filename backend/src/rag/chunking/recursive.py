@@ -56,7 +56,7 @@ class RecursiveChunker:
         chunks: list[Chunk] = []
 
         for page in document.pages:
-            page_chunks = self._split_text(page.text)
+            page_chunks = self.split_text(page.text)
             for text in page_chunks:
                 chunk_index = len(chunks)
                 content_hash = _sha256_text(text)
@@ -82,6 +82,10 @@ class RecursiveChunker:
                 )
 
         return chunks
+
+    def split_text(self, text: str) -> list[str]:
+        """Split text with the configured paragraph-to-character strategy."""
+        return self._split_text(text)
 
     def _split_text(self, text: str) -> list[str]:
         """Split one page without allowing chunks to cross its boundary."""
@@ -162,4 +166,3 @@ class RecursiveChunker:
             )
         )
         return _sha256_text(identity)
-
