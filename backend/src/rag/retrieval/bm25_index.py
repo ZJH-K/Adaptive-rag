@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from threading import Lock
+from datetime import datetime, timezone
+from threading import Lock, RLock
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from rank_bm25 import BM25Okapi
 
@@ -14,6 +17,19 @@ from src.rag.schemas import Chunk
 
 class DuplicateChunkIDError(ValueError):
     """Raised when a corpus contains more than one Chunk with the same ID."""
+
+
+class BM25IndexStatus(BaseModel):
+    """Request-safe health snapshot for the in-memory BM25 index."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generation: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    needs_rebuild: bool
+    last_successful_rebuild_at: datetime | None = None
+    last_failure_code: str | None = None
+    is_rebuilding: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +69,11 @@ class BM25Index:
         self.tokenizer = tokenizer or JiebaTokenizer()
         self._snapshot = BM25IndexSnapshot()
         self._publish_lock = Lock()
+        self._rebuild_lock = RLock()
         self._needs_rebuild = False
+        self._last_successful_rebuild_at: datetime | None = None
+        self._last_failure_code: str | None = None
+        self._is_rebuilding = False
 
     @classmethod
     def from_chunks(
@@ -67,37 +87,69 @@ class BM25Index:
 
     def rebuild(self, chunks: Sequence[Chunk]) -> BM25Index:
         """Atomically replace the complete corpus and position mapping."""
-        materialized = tuple(chunks)
-        self._ensure_unique_chunk_ids(materialized)
-        tokenized = tuple(
-            tuple(self.tokenizer.tokenize(chunk.text)) for chunk in materialized
-        )
-        model = (
-            BM25Okapi([list(tokens) for tokens in tokenized])
-            if any(tokenized)
-            else None
-        )
+        with self._rebuild_lock:
+            with self._publish_lock:
+                self._is_rebuilding = True
+            try:
+                materialized = tuple(chunks)
+                self._ensure_unique_chunk_ids(materialized)
+                tokenized = tuple(
+                    tuple(self.tokenizer.tokenize(chunk.text))
+                    for chunk in materialized
+                )
+                model = (
+                    BM25Okapi([list(tokens) for tokens in tokenized])
+                    if any(tokenized)
+                    else None
+                )
+            except Exception:
+                with self._publish_lock:
+                    self._needs_rebuild = True
+                    self._last_failure_code = "bm25_rebuild_failed"
+                    self._is_rebuilding = False
+                raise
 
-        with self._publish_lock:
-            self._snapshot = BM25IndexSnapshot(
-                chunks=materialized,
-                chunk_ids=tuple(chunk.chunk_id for chunk in materialized),
-                tokenized_corpus=tokenized,
-                model=model,
-                generation=self._snapshot.generation + 1,
-                is_built=True,
-            )
-            self._needs_rebuild = False
+            with self._publish_lock:
+                self._snapshot = BM25IndexSnapshot(
+                    chunks=materialized,
+                    chunk_ids=tuple(chunk.chunk_id for chunk in materialized),
+                    tokenized_corpus=tokenized,
+                    model=model,
+                    generation=self._snapshot.generation + 1,
+                    is_built=True,
+                )
+                self._needs_rebuild = False
+                self._last_successful_rebuild_at = datetime.now(timezone.utc)
+                self._last_failure_code = None
+                self._is_rebuilding = False
         return self
 
     def snapshot(self) -> BM25IndexSnapshot:
         """Capture one complete corpus generation for a query."""
         return self._snapshot
 
-    def mark_needs_rebuild(self) -> None:
+    def mark_needs_rebuild(
+        self,
+        error_code: str | None = None,
+    ) -> None:
         """Mark the in-memory index stale after vector persistence changed."""
         with self._publish_lock:
             self._needs_rebuild = True
+            if error_code is not None:
+                self._last_failure_code = error_code
+
+    def status(self) -> BM25IndexStatus:
+        """Return one internally consistent, immutable health snapshot."""
+        with self._publish_lock:
+            snapshot = self._snapshot
+            return BM25IndexStatus(
+                generation=snapshot.generation,
+                chunk_count=len(snapshot.chunks),
+                needs_rebuild=self._needs_rebuild,
+                last_successful_rebuild_at=self._last_successful_rebuild_at,
+                last_failure_code=self._last_failure_code,
+                is_rebuilding=self._is_rebuilding,
+            )
 
     @property
     def chunks(self) -> tuple[Chunk, ...]:

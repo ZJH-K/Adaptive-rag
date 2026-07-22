@@ -124,6 +124,10 @@ def _mixed_hits() -> list[SearchHit]:
 def _diagnostics() -> RetrievalDiagnostics:
     return RetrievalDiagnostics(
         mode="hybrid",
+        requested_mode="hybrid",
+        rrf_entered=True,
+        rerank_entered=True,
+        final_count=2,
         dense_count=2,
         bm25_count=2,
         fused_count=2,

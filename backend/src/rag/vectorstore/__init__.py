@@ -12,6 +12,7 @@ from src.rag.vectorstore.exceptions import (
     VectorStoreInputError,
     VectorStoreResponseError,
 )
+from src.rag.retrieval.exceptions import VectorStoreUnavailableError
 
 __all__ = [
     "ChromaVectorStore",
@@ -20,7 +21,7 @@ __all__ = [
     "VectorStoreError",
     "VectorStoreInputError",
     "VectorStoreResponseError",
+    "VectorStoreUnavailableError",
     "deserialize_chunk_metadata",
     "serialize_chunk_metadata",
 ]
-

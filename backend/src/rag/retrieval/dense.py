@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from src.rag.embeddings.exceptions import EmbeddingRequestError
+from src.rag.retrieval.exceptions import (
+    DenseRetrievalUnavailableError,
+    VectorStoreUnavailableError,
+)
 from src.rag.schemas import SearchHit
 from src.rag.vectorstore.chroma import ChromaVectorStore
 
@@ -62,11 +67,22 @@ class DenseRetriever:
                 "DenseRetriever top_n must be a positive integer"
             )
 
-        query_embedding = self.embedding_client.embed_query(query)
-        results = self.vector_store.query_by_vector(
-            query_embedding,
-            top_k=effective_top_n,
-        )
+        try:
+            query_embedding = self.embedding_client.embed_query(query)
+        except EmbeddingRequestError as exc:
+            raise DenseRetrievalUnavailableError(
+                code="embedding_request_failed",
+            ) from exc
+        try:
+            results = self.vector_store.query_by_vector(
+                query_embedding,
+                top_k=effective_top_n,
+            )
+        except VectorStoreUnavailableError as exc:
+            raise DenseRetrievalUnavailableError(
+                code=exc.code,
+                safe_message=exc.safe_message,
+            ) from exc
         return [
             SearchHit(
                 chunk_id=result.chunk_id,

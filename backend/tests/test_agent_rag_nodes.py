@@ -122,7 +122,7 @@ def test_retrieve_uses_rewritten_query_and_preserves_ranked_hits() -> None:
         "context_chunk_ids",
         "current_stage",
         "answer_available",
-        "trace_id",
+        "request_id",
     }
 
 
@@ -253,7 +253,7 @@ def test_empty_retrieval_is_stable_and_does_not_call_llm() -> None:
         "context_chunk_ids": [],
         "current_stage": "context",
         "answer_available": False,
-        "trace_id": retrieval_state["trace_id"],
+        "request_id": retrieval_state["request_id"],
     }
     assert context_builder.calls == [[]]
     assert answer_state["answer"] == NO_EVIDENCE_ANSWER

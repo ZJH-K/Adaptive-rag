@@ -15,4 +15,3 @@ class VectorStoreInputError(ValueError, VectorStoreError):
 
 class VectorStoreResponseError(VectorStoreError):
     """Raised when stored data cannot be reconstructed safely."""
-

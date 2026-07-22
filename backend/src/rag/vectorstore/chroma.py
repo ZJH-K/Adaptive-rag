@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
+import httpx
 from chromadb.api import ClientAPI
 from chromadb.api.models.Collection import Collection
+from chromadb.errors import InternalError, QuotaError, RateLimitError
 
 from src.config import Settings
 from src.rag.schemas import Chunk
+from src.rag.retrieval.exceptions import VectorStoreUnavailableError
 from src.rag.vectorstore.exceptions import (
     VectorStoreConfigurationError,
     VectorStoreInputError,
@@ -153,14 +156,20 @@ class ChromaVectorStore:
             raise VectorStoreInputError("top_k must be a positive integer")
         self._validate_embeddings([query_embedding])
 
-        collection_count = self.count()
+        try:
+            collection_count = self.count()
+        except (InternalError, QuotaError, RateLimitError, httpx.TransportError) as exc:
+            raise VectorStoreUnavailableError() from exc
         if collection_count == 0:
             return []
-        result = self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(top_k, collection_count),
-            include=["documents", "metadatas", "distances"],
-        )
+        try:
+            result = self._collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(top_k, collection_count),
+                include=["documents", "metadatas", "distances"],
+            )
+        except (InternalError, QuotaError, RateLimitError, httpx.TransportError) as exc:
+            raise VectorStoreUnavailableError() from exc
         return self._parse_query_result(result)
 
     def count(self) -> int:

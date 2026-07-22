@@ -266,7 +266,7 @@ def test_rag_branch_orders_context_and_citations_from_reranked_hits() -> None:
         dense,
         bm25,
         reranker=reranker,
-        settings=Settings(_env_file=None),
+            settings=Settings(_env_file=None, reranker_enabled=True),
         fusion=EventFusion(events),
     )
     graph = build_graph(

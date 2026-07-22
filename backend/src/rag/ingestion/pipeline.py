@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import RLock
 from typing import Literal, Protocol
 
 from pydantic import BaseModel
@@ -14,7 +15,7 @@ from src.rag.chunking.factory import (
 )
 from src.rag.chunking.recursive import RecursiveChunker
 from src.rag.parsers.factory import ParserFactory
-from src.rag.retrieval.bm25_index import BM25Index
+from src.rag.retrieval.bm25_index import BM25Index, BM25IndexStatus
 from src.rag.vectorstore.chroma import ChromaVectorStore
 
 
@@ -30,17 +31,16 @@ class IngestionError(RuntimeError):
     """Raised when a parsed document cannot produce ingestible chunks."""
 
 
-class BM25IndexSyncError(IngestionError):
-    """Raised when vectors persisted but the in-memory BM25 refresh failed."""
-
-
 class IngestionResult(BaseModel):
-    """Summary returned after a document is successfully persisted."""
+    """Summary distinguishing complete persistence from BM25 partial failure."""
 
     document_id: str
     filename: str
     chunks_count: int
-    status: Literal["done"] = "done"
+    status: Literal["done", "partial"] = "done"
+    bm25_synced: bool | None = None
+    error_code: str | None = None
+    index_status: BM25IndexStatus | None = None
 
 
 class IngestionPipeline:
@@ -55,6 +55,7 @@ class IngestionPipeline:
         chunk_size: int = 800,
         chunk_overlap: int = 100,
         bm25_index: BM25Index | None = None,
+        consistency_lock: RLock | None = None,
     ) -> None:
         """Inject pipeline components and configure factory-created chunkers."""
         self.embedding_client = embedding_client
@@ -66,6 +67,7 @@ class IngestionPipeline:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.bm25_index = bm25_index
+        self._consistency_lock = consistency_lock or RLock()
 
     def ingest(
         self,
@@ -93,18 +95,33 @@ class IngestionPipeline:
         embeddings = self.embedding_client.embed_documents(
             [chunk.text for chunk in chunks]
         )
-        self.vector_store.upsert_chunks(chunks, embeddings)
-        if self.bm25_index is not None:
+        with self._consistency_lock:
+            self.vector_store.upsert_chunks(chunks, embeddings)
+            if self.bm25_index is None:
+                return IngestionResult(
+                    document_id=document.document_id,
+                    filename=document.filename,
+                    chunks_count=len(chunks),
+                )
+
+            self.bm25_index.mark_needs_rebuild()
             try:
                 self.bm25_index.rebuild(self.vector_store.get_all_chunks())
-            except Exception as exc:
-                self.bm25_index.mark_needs_rebuild()
-                raise BM25IndexSyncError(
-                    "Vector persistence succeeded, but BM25 refresh failed; "
-                    "the index is marked for a full rebuild"
-                ) from exc
-        return IngestionResult(
-            document_id=document.document_id,
-            filename=document.filename,
-            chunks_count=len(chunks),
-        )
+            except Exception:
+                self.bm25_index.mark_needs_rebuild("bm25_rebuild_failed")
+                return IngestionResult(
+                    document_id=document.document_id,
+                    filename=document.filename,
+                    chunks_count=len(chunks),
+                    status="partial",
+                    bm25_synced=False,
+                    error_code="bm25_rebuild_failed",
+                    index_status=self.bm25_index.status(),
+                )
+            return IngestionResult(
+                document_id=document.document_id,
+                filename=document.filename,
+                chunks_count=len(chunks),
+                bm25_synced=True,
+                index_status=self.bm25_index.status(),
+            )

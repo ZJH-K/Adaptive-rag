@@ -6,6 +6,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
+from threading import Lock
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,6 +42,18 @@ class RerankScore(BaseModel):
 
     index: int = Field(ge=0)
     score: float = Field(allow_inf_nan=False)
+
+
+class RerankerStatus(BaseModel):
+    """Safe readiness state exposed to application health checks."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool
+    configured: bool
+    available: bool
+    model: str
+    last_error_code: str | None = None
 
 
 class RerankTransport(Protocol):
@@ -264,7 +277,13 @@ class RerankerClient:
 class RerankerAdapter:
     """Map provider scores onto copies of unified SearchHit candidates."""
 
-    def __init__(self, client: RerankScoringClient, *, top_k: int = 5) -> None:
+    def __init__(
+        self,
+        client: RerankScoringClient,
+        *,
+        top_k: int = 5,
+        model: str = "configured-reranker",
+    ) -> None:
         """Configure the scoring client and final result limit."""
         if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
             raise RerankerConfigurationError(
@@ -272,12 +291,22 @@ class RerankerAdapter:
             )
         self.client = client
         self.top_k = top_k
+        self.model = model
+        self._last_error_code: str | None = None
+        self._status_lock = Lock()
 
     def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         """Return copied hits sorted by score and original-position tie-break."""
         if not hits:
             return []
-        scores = self.client.score(query, [hit.text for hit in hits])
+        try:
+            scores = self.client.score(query, [hit.text for hit in hits])
+        except RerankerError as exc:
+            with self._status_lock:
+                self._last_error_code = _reranker_error_code(exc)
+            raise
+        with self._status_lock:
+            self._last_error_code = None
         if len(scores) != len(hits):
             raise RerankerResponseError(
                 "Reranker client returned an unexpected score count"
@@ -313,6 +342,18 @@ class RerankerAdapter:
         )
         return [hit for _, _, hit in mapped[: self.top_k]]
 
+    def get_status(self) -> RerankerStatus:
+        """Return current configured readiness and last safe runtime error."""
+        with self._status_lock:
+            error_code = self._last_error_code
+        return RerankerStatus(
+            enabled=True,
+            configured=True,
+            available=error_code is None,
+            model=self.model,
+            last_error_code=error_code,
+        )
+
 
 class NoOpReranker:
     """Disabled-mode implementation that performs no external work."""
@@ -320,6 +361,18 @@ class NoOpReranker:
     def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         """Return independent copies while preserving the input ranking."""
         return [hit.model_copy(deep=True) for hit in hits]
+
+    def __init__(self, model: str = "disabled") -> None:
+        self.model = model
+
+    def get_status(self) -> RerankerStatus:
+        """Report the intentional disabled state."""
+        return RerankerStatus(
+            enabled=False,
+            configured=False,
+            available=False,
+            model=self.model,
+        )
 
 
 def build_reranker(
@@ -331,9 +384,63 @@ def build_reranker(
     """Build an enabled adapter or a disabled no-op implementation."""
     configured = settings or Settings()
     if not configured.reranker_enabled:
-        return NoOpReranker()
+        return NoOpReranker(configured.reranker_model)
+    if not configured.reranker_api_key and client is None:
+        return UnavailableReranker(
+            model=configured.reranker_model,
+            error_code="reranker_not_configured",
+        )
     scoring_client = client or RerankerClient(
         configured,
         transport=transport,
     )
-    return RerankerAdapter(scoring_client, top_k=configured.rerank_top_k)
+    return RerankerAdapter(
+        scoring_client,
+        top_k=configured.rerank_top_k,
+        model=configured.reranker_model,
+    )
+
+
+class UnavailableReranker:
+    """Enabled but unavailable reranker with explicit health semantics."""
+
+    def __init__(self, *, model: str, error_code: str) -> None:
+        self.model = model
+        self.error_code = error_code
+
+    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        raise RerankerConfigurationError("Reranker is unavailable")
+
+    def get_status(self) -> RerankerStatus:
+        return RerankerStatus(
+            enabled=True,
+            configured=False,
+            available=False,
+            model=self.model,
+            last_error_code=self.error_code,
+        )
+
+
+def get_reranker_status(reranker: Reranker) -> RerankerStatus:
+    """Read readiness without coupling health checks to implementations."""
+    getter = getattr(reranker, "get_status", None)
+    if callable(getter):
+        return getter()
+    return RerankerStatus(
+        enabled=True,
+        configured=True,
+        available=True,
+        model="custom-reranker",
+    )
+
+
+def _reranker_error_code(exc: RerankerError) -> str:
+    if isinstance(exc, RerankerRequestError):
+        return "reranker_request_failed"
+    if isinstance(exc, RerankerResponseError):
+        return "reranker_response_invalid"
+    if isinstance(exc, RerankerConfigurationError):
+        return "reranker_not_configured"
+    if isinstance(exc, RerankerInputError):
+        return "reranker_input_invalid"
+    return "reranker_failed"

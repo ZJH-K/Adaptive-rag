@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol
 
-from openai import OpenAI
+from openai import APIError, OpenAI
 
 from src.config import Settings
 from src.rag.embeddings.exceptions import (
@@ -155,7 +155,7 @@ class EmbeddingClient:
                 model=self.model,
                 dimensions=self.dimension,
             )
-        except Exception as exc:
+        except APIError as exc:
             error_type = type(exc).__name__
             raise EmbeddingRequestError(
                 f"Embedding request failed ({error_type})"

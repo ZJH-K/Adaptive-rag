@@ -8,6 +8,7 @@ from src.rag.retrieval import (
     BM25Index,
     BM25RetrievalConfigurationError,
     BM25RetrievalInputError,
+    BM25RetrievalUnavailableError,
     BM25Retriever,
 )
 from src.rag.retrieval.tokenizer import JiebaTokenizer
@@ -213,6 +214,36 @@ def test_empty_index_returns_empty_without_tokenizing_query() -> None:
 
     assert BM25Retriever(index).retrieve("query") == []
     assert tokenizer.calls == []
+
+
+def test_stale_index_is_a_recoverable_bm25_path_failure() -> None:
+    index = BM25Index.from_chunks(
+        _technical_chunks(), tokenizer=RecordingWhitespaceTokenizer()
+    )
+    index.mark_needs_rebuild()
+
+    with pytest.raises(BM25RetrievalUnavailableError) as raised:
+        BM25Retriever(index).retrieve("query")
+
+    assert raised.value.code == "bm25_index_stale"
+    assert raised.value.path == "bm25"
+    assert raised.value.recoverable is True
+
+
+def test_tokenizer_io_failure_is_a_recoverable_bm25_path_failure() -> None:
+    class FailedTokenizer(RecordingWhitespaceTokenizer):
+        def tokenize(self, text: str) -> list[str]:
+            if text == "query":
+                raise OSError("private tokenizer detail")
+            return super().tokenize(text)
+
+    index = BM25Index.from_chunks(_technical_chunks(), tokenizer=FailedTokenizer())
+
+    with pytest.raises(BM25RetrievalUnavailableError) as raised:
+        BM25Retriever(index).retrieve("query")
+
+    assert raised.value.code == "bm25_tokenizer_failed"
+    assert "private tokenizer detail" not in raised.value.safe_message
 
 
 def test_all_zero_scores_return_no_irrelevant_hits() -> None:
