@@ -26,6 +26,24 @@ SYSTEM_PROMPT = """你是一个严谨的技术文档问答助手。
 NO_EVIDENCE_ANSWER = "未找到足够的文档依据来回答该问题。"
 
 
+def build_rag_messages(question: str, context: str) -> list[ChatMessage]:
+    """Build citation-aware answer messages from a question and context."""
+
+    user_prompt = f"""--- 检索上下文开始 ---
+{context}
+--- 检索上下文结束 ---
+
+--- 用户问题开始 ---
+{question}
+--- 用户问题结束 ---
+
+请只依据检索上下文回答，并在相关陈述后使用 [S1] 等来源编号。"""
+    return [
+        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="user", content=user_prompt),
+    ]
+
+
 class Retriever(Protocol):
     """Retrieval capability required by the basic RAG service."""
 
@@ -135,16 +153,4 @@ class BasicRAGService:
     @staticmethod
     def _build_messages(question: str, context: str) -> list[ChatMessage]:
         """Separate trusted instructions, retrieved context, and user input."""
-        user_prompt = f"""--- 检索上下文开始 ---
-{context}
---- 检索上下文结束 ---
-
---- 用户问题开始 ---
-{question}
---- 用户问题结束 ---
-
-请只依据检索上下文回答，并在相关陈述后使用 [S1] 等来源编号。"""
-        return [
-            ChatMessage(role="system", content=SYSTEM_PROMPT),
-            ChatMessage(role="user", content=user_prompt),
-        ]
+        return build_rag_messages(question, context)
