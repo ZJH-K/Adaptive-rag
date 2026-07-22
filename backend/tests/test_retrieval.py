@@ -88,6 +88,31 @@ def test_top_k_limits_results(tmp_path: Path) -> None:
         assert len(hits) == 2
 
 
+def test_request_top_n_is_passed_to_chroma_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store(tmp_path / "chroma") as store:
+        requested_limits: list[int] = []
+        original_query = store.query_by_vector
+
+        def recording_query(
+            query_embedding: list[float],
+            top_k: int,
+        ) -> object:
+            requested_limits.append(top_k)
+            return original_query(query_embedding, top_k)
+
+        monkeypatch.setattr(store, "query_by_vector", recording_query)
+
+        DenseRetriever(_embedder(), store, top_k=1).retrieve(
+            "dense",
+            top_n=7,
+        )
+
+        assert requested_limits == [7]
+
+
 def test_search_hit_metadata_contains_source_and_pdf_page(tmp_path: Path) -> None:
     with _store(tmp_path / "chroma") as store:
         store.upsert_chunks(
@@ -133,4 +158,3 @@ def test_blank_query_is_rejected_without_embedding(
             retriever.retrieve(query)
 
         assert embedder.query_calls == []
-

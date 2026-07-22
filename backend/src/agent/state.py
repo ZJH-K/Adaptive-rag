@@ -1,10 +1,13 @@
 """Shared state and structured-output contracts for the RAG workflow."""
 
+from operator import add
 from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
+from src.agent.failures import WorkflowFailure, WorkflowStage
 from src.rag.context_builder import ContextSource
+from src.rag.retrieval.pipeline import RetrievalDiagnostics
 from src.rag.schemas import SearchHit
 
 
@@ -28,7 +31,13 @@ class AgentState(TypedDict, total=False):
     context: str
     context_sources: list[ContextSource]
     context_chunk_ids: list[str]
+    retrieval_diagnostics: RetrievalDiagnostics
     answer: str
+
+    current_stage: WorkflowStage
+    degradation_events: Annotated[list[WorkflowFailure], add]
+    fatal_error: WorkflowFailure | None
+    answer_available: bool
 
     trace_id: str
 

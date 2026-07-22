@@ -68,13 +68,15 @@ def test_contextual_reference_is_completed_with_necessary_entities() -> None:
 
     result = rewrite_query(state, llm)
 
-    assert result == {
-        "rewritten_query": "LangGraph checkpoint 状态保存机制有哪些限制？"
-    }
+    assert (
+        result["rewritten_query"]
+        == "LangGraph checkpoint 状态保存机制有哪些限制？"
+    )
     assert "LangGraph" in result["rewritten_query"]
     assert "checkpoint" in result["rewritten_query"]
     assert "限制" in result["rewritten_query"]
-    assert set(result) == {"rewritten_query"}
+    assert result["current_stage"] == "rewrite"
+    assert result["answer_available"] is False
     assert state["question"] == question
     assert "LangGraph checkpoint 如何保存状态？" in _sent_text(llm)
 
@@ -88,7 +90,7 @@ def test_standalone_question_keeps_its_original_topic() -> None:
 
     result = rewrite_query({"question": question}, llm)
 
-    assert result == {"rewritten_query": question}
+    assert result["rewritten_query"] == question
 
 
 @pytest.mark.parametrize(
@@ -103,7 +105,7 @@ def test_rewrite_accepts_wrapped_valid_json(output: str) -> None:
 
     result = rewrite_query({"question": "它是什么？"}, llm)
 
-    assert result == {"rewritten_query": "独立问题"}
+    assert result["rewritten_query"] == "独立问题"
 
 
 @pytest.mark.parametrize(
@@ -125,7 +127,10 @@ def test_invalid_rewrite_output_falls_back_to_original_question(
 
     result = rewrite_query({"question": question}, llm)
 
-    assert result == {"rewritten_query": question.strip()}
+    assert result["rewritten_query"] == question.strip()
+    event = result["degradation_events"][0]
+    assert event.stage == "rewrite"
+    assert event.fallback == "original_question"
 
 
 def test_rewrite_prompt_uses_only_bounded_recent_history() -> None:

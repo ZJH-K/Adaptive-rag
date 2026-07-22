@@ -72,10 +72,10 @@ def test_router_sends_general_questions_to_direct_answer(question: str) -> None:
 
     result = route_query({"question": question}, llm)
 
-    assert result == {
-        "need_retrieval": False,
-        "route_reason": "这是可直接回答的通用知识问题",
-    }
+    assert result["need_retrieval"] is False
+    assert result["route_reason"] == "这是可直接回答的通用知识问题"
+    assert result["current_stage"] == "router"
+    assert result["answer_available"] is False
 
 
 @pytest.mark.parametrize(
@@ -129,7 +129,8 @@ def test_router_accepts_wrapped_valid_json(output: str) -> None:
 
     result = route_query({"question": "测试问题"}, llm)
 
-    assert result == {"need_retrieval": False, "route_reason": "direct"}
+    assert result["need_retrieval"] is False
+    assert result["route_reason"] == "direct"
 
 
 @pytest.mark.parametrize(
@@ -150,10 +151,12 @@ def test_invalid_router_output_conservatively_falls_back_to_retrieval(
 
     result = route_query({"question": "测试问题"}, llm)
 
-    assert result == {
-        "need_retrieval": True,
-        "route_reason": ROUTER_PARSE_FAILURE_REASON,
-    }
+    assert result["need_retrieval"] is True
+    assert result["route_reason"] == ROUTER_PARSE_FAILURE_REASON
+    event = result["degradation_events"][0]
+    assert event.stage == "router"
+    assert event.error_type == "invalid_response"
+    assert event.fallback == "retrieve"
 
 
 def test_direct_answer_returns_only_answer_without_retrieval_context() -> None:
@@ -166,7 +169,9 @@ def test_direct_answer_returns_only_answer_without_retrieval_context() -> None:
 
     result = direct_answer(state, llm)
 
-    assert result == {"answer": "RAG 是检索增强生成。"}
+    assert result["answer"] == "RAG 是检索增强生成。"
+    assert result["current_stage"] == "direct_answer"
+    assert result["answer_available"] is True
     sent_text = "\n".join(
         _message_content(message) for message in llm.calls[0]
     )

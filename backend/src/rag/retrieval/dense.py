@@ -43,15 +43,29 @@ class DenseRetriever:
         self.vector_store = vector_store
         self.top_k = top_k
 
-    def retrieve(self, query: str) -> list[SearchHit]:
-        """Return dense results ordered from most to least relevant."""
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_n: int | None = None,
+    ) -> list[SearchHit]:
+        """Return dense results using an optional request-level result limit."""
         if not isinstance(query, str) or not query.strip():
             raise DenseRetrievalInputError("Query must be a non-empty string")
+        effective_top_n = self.top_k if top_n is None else top_n
+        if (
+            not isinstance(effective_top_n, int)
+            or isinstance(effective_top_n, bool)
+            or effective_top_n <= 0
+        ):
+            raise DenseRetrievalConfigurationError(
+                "DenseRetriever top_n must be a positive integer"
+            )
 
         query_embedding = self.embedding_client.embed_query(query)
         results = self.vector_store.query_by_vector(
             query_embedding,
-            top_k=self.top_k,
+            top_k=effective_top_n,
         )
         return [
             SearchHit(
@@ -62,4 +76,3 @@ class DenseRetriever:
             )
             for result in results
         ]
-

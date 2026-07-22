@@ -1,6 +1,7 @@
 """Public document ingestion interface."""
 
 from src.rag.ingestion.pipeline import (
+    BM25IndexSyncError,
     DocumentEmbedder,
     IngestionError,
     IngestionPipeline,
@@ -8,9 +9,9 @@ from src.rag.ingestion.pipeline import (
 )
 
 __all__ = [
+    "BM25IndexSyncError",
     "DocumentEmbedder",
     "IngestionError",
     "IngestionPipeline",
     "IngestionResult",
 ]
-

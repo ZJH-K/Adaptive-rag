@@ -162,6 +162,24 @@ def test_top_n_limits_results_and_larger_limit_is_safe() -> None:
     assert len(oversized) == len(chunks)
 
 
+def test_request_top_n_overrides_constructor_limit() -> None:
+    chunks = [
+        _chunk(f"chunk-{index}", f"shared token{index}", index)
+        for index in range(5)
+    ]
+    retriever = BM25Retriever(
+        BM25Index.from_chunks(
+            chunks,
+            tokenizer=RecordingWhitespaceTokenizer(),
+        ),
+        top_n=1,
+    )
+
+    hits = retriever.retrieve("shared", top_n=3)
+
+    assert len(hits) == 3
+
+
 def test_equal_scores_keep_original_corpus_position_order() -> None:
     index = BM25Index.from_chunks(
         [

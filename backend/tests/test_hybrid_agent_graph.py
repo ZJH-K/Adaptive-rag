@@ -75,11 +75,16 @@ class EventRetriever:
         self.hits = hits
         self.queries: list[str] = []
 
-    def retrieve(self, query: str) -> list[SearchHit]:
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_n: int | None = None,
+    ) -> list[SearchHit]:
         """Record the rewritten query and return configured hits."""
         self.events.append(self.source)
         self.queries.append(query)
-        return list(self.hits)
+        return list(self.hits if top_n is None else self.hits[:top_n])
 
 
 class EventContextBuilder:
@@ -114,6 +119,26 @@ class EventFusion:
         return reciprocal_rank_fusion(
             dense_hits, bm25_hits, k=k, top_n=top_n
         )
+
+
+class EventReranker:
+    """Record reranking and reverse candidates with deterministic scores."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.calls: list[list[str]] = []
+
+    def rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        """Reverse candidates so context ordering proves rerank integration."""
+        self.events.append("rerank")
+        self.calls.append([hit.chunk_id for hit in hits])
+        return [
+            hit.model_copy(
+                update={"rerank_score": float(len(hits) - index)},
+                deep=True,
+            )
+            for index, hit in enumerate(reversed(hits))
+        ]
 
 
 def _message_text(
@@ -158,7 +183,7 @@ def _pipeline(
     pipeline = HybridRetrievalPipeline(
         dense,
         bm25,
-        settings=Settings(_env_file=None),
+        settings=Settings(_env_file=None, reranker_enabled=False),
         fusion=EventFusion(events),
     )
     return pipeline, dense, bm25
@@ -208,3 +233,70 @@ def test_direct_branch_does_not_call_pipeline_retrievers_or_fusion() -> None:
     assert dense.queries == []
     assert bm25.queries == []
     assert events == ["route", "direct"]
+
+
+def test_rag_branch_orders_context_and_citations_from_reranked_hits() -> None:
+    events: list[str] = []
+    first = SearchHit(
+        chunk_id="first",
+        text="First candidate.",
+        metadata={
+            "source": "first.md",
+            "source_type": "markdown",
+            "section": "First",
+            "content_hash": "first-hash",
+        },
+        dense_score=0.9,
+    )
+    second = SearchHit(
+        chunk_id="second",
+        text="Second candidate.",
+        metadata={
+            "source": "second.md",
+            "source_type": "markdown",
+            "section": "Second",
+            "content_hash": "second-hash",
+        },
+        bm25_score=4.0,
+    )
+    dense = EventRetriever("dense", events, [first])
+    bm25 = EventRetriever("bm25", events, [second])
+    reranker = EventReranker(events)
+    pipeline = HybridRetrievalPipeline(
+        dense,
+        bm25,
+        reranker=reranker,
+        settings=Settings(_env_file=None),
+        fusion=EventFusion(events),
+    )
+    graph = build_graph(
+        WorkflowLLM(events),
+        pipeline,
+        EventContextBuilder(events),
+    )
+
+    result = graph.invoke({"question": "文档中的状态机制如何配置？"})
+
+    assert events == [
+        "route",
+        "rewrite",
+        "dense",
+        "bm25",
+        "fusion",
+        "rerank",
+        "context",
+        "generate",
+    ]
+    assert reranker.calls == [["first", "second"]]
+    assert [hit.chunk_id for hit in result["retrieved_documents"]] == [
+        "second",
+        "first",
+    ]
+    assert result["context_chunk_ids"] == ["second", "first"]
+    assert [source.chunk_id for source in result["context_sources"]] == [
+        "second",
+        "first",
+    ]
+    assert result["context_sources"][0].citation_id == "S1"
+    assert "[S1] second.md | section Second" in result["context"]
+    assert result["retrieval_diagnostics"].rerank_output_count == 2

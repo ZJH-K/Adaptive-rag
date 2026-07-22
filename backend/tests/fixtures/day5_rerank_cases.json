@@ -1,0 +1,95 @@
+{
+  "description": "Engineered Day5 rerank acceptance cases; not a statistical evaluation.",
+  "cases": [
+    {
+      "id": "thread_id",
+      "query": "LangGraph thread_id 如何用于 checkpoint 状态隔离？",
+      "relevant_chunk_id": "thread-id-exact",
+      "dense_order": ["checkpoint-overview", "thread-pool", "state-schema", "thread-id-exact", "memory-guide"],
+      "bm25_order": ["state-schema", "checkpoint-overview", "thread-id-exact", "thread-pool", "memory-guide"],
+      "scores": {"thread-id-exact": 0.98, "checkpoint-overview": 0.51, "state-schema": 0.43, "thread-pool": 0.12, "memory-guide": 0.08},
+      "texts": {
+        "thread-id-exact": "thread_id identifies the checkpoint state namespace for each LangGraph thread.",
+        "checkpoint-overview": "Checkpointing persists graph state between executions.",
+        "thread-pool": "A thread pool controls concurrent worker execution.",
+        "state-schema": "State schemas define graph channel values.",
+        "memory-guide": "Long-term memory stores user facts across sessions."
+      }
+    },
+    {
+      "id": "similarity_search",
+      "query": "Chroma similarity_search 的 top_k 在哪里生效？",
+      "relevant_chunk_id": "similarity-api",
+      "dense_order": ["semantic-intro", "top-k-metric", "vector-index", "similarity-api", "distance-note"],
+      "bm25_order": ["top-k-metric", "semantic-intro", "similarity-api", "distance-note", "vector-index"],
+      "scores": {"similarity-api": 0.97, "top-k-metric": 0.55, "semantic-intro": 0.41, "distance-note": 0.24, "vector-index": 0.19},
+      "texts": {
+        "similarity-api": "similarity_search receives top_k and forwards it to the Chroma vector query.",
+        "semantic-intro": "Semantic search retrieves conceptually related passages.",
+        "top-k-metric": "Recall@K measures relevant items in the first K results.",
+        "vector-index": "A vector index accelerates nearest-neighbor lookup.",
+        "distance-note": "Cosine distance is converted to a similarity score."
+      }
+    },
+    {
+      "id": "rrf_formula",
+      "query": "RRF 的 k=60 如何影响 fused_score？",
+      "relevant_chunk_id": "rrf-formula",
+      "dense_order": ["fusion-overview", "score-scale", "ranking-metric", "rrf-formula", "random-forest"],
+      "bm25_order": ["score-scale", "ranking-metric", "rrf-formula", "fusion-overview", "random-forest"],
+      "scores": {"rrf-formula": 0.99, "fusion-overview": 0.62, "score-scale": 0.49, "ranking-metric": 0.31, "random-forest": 0.02},
+      "texts": {
+        "rrf-formula": "RRF computes fused_score as the sum of 1 divided by k plus one-based rank, commonly with k=60.",
+        "fusion-overview": "Rank fusion combines multiple retrieval lists.",
+        "score-scale": "Dense and BM25 raw scores use different scales.",
+        "ranking-metric": "MRR uses the reciprocal rank of the first relevant item.",
+        "random-forest": "Random forests combine decision trees and are sometimes abbreviated RF."
+      }
+    },
+    {
+      "id": "reranker_model",
+      "query": "BAAI/bge-reranker-v2-m3 在流水线哪个阶段运行？",
+      "relevant_chunk_id": "reranker-stage",
+      "dense_order": ["bge-embedding", "model-config", "cross-encoder", "reranker-stage", "m3-language"],
+      "bm25_order": ["model-config", "cross-encoder", "reranker-stage", "bge-embedding", "m3-language"],
+      "scores": {"reranker-stage": 0.98, "cross-encoder": 0.65, "model-config": 0.44, "bge-embedding": 0.22, "m3-language": 0.14},
+      "texts": {
+        "reranker-stage": "BAAI/bge-reranker-v2-m3 runs after RRF fusion and before ContextBuilder.",
+        "bge-embedding": "BAAI/bge-m3 creates dense embedding vectors.",
+        "model-config": "Model names are supplied through environment configuration.",
+        "cross-encoder": "A cross-encoder jointly scores a query and candidate.",
+        "m3-language": "M3 models support multilingual inputs."
+      }
+    },
+    {
+      "id": "langfuse_base_url",
+      "query": "LANGFUSE_BASE_URL 配置控制什么？",
+      "relevant_chunk_id": "langfuse-config",
+      "dense_order": ["trace-overview", "otel-export", "environment-config", "langfuse-config", "service-url"],
+      "bm25_order": ["environment-config", "trace-overview", "langfuse-config", "service-url", "otel-export"],
+      "scores": {"langfuse-config": 0.96, "environment-config": 0.59, "trace-overview": 0.42, "otel-export": 0.27, "service-url": 0.11},
+      "texts": {
+        "langfuse-config": "LANGFUSE_BASE_URL selects the Langfuse Cloud region or self-hosted ingestion endpoint.",
+        "trace-overview": "A trace correlates workflow observations.",
+        "otel-export": "OpenTelemetry exporters send spans in batches.",
+        "environment-config": "Environment variables configure external providers.",
+        "service-url": "A base URL identifies an HTTP service root."
+      }
+    },
+    {
+      "id": "context_sources",
+      "query": "context_sources 如何保证 [S1] 引用与 chunk 对齐？",
+      "relevant_chunk_id": "source-mapping",
+      "dense_order": ["source-mapping", "citation-style", "context-budget", "chunk-schema", "metadata-guide"],
+      "bm25_order": ["source-mapping", "chunk-schema", "citation-style", "metadata-guide", "context-budget"],
+      "scores": {"source-mapping": 0.99, "citation-style": 0.53, "chunk-schema": 0.39, "context-budget": 0.22, "metadata-guide": 0.18},
+      "texts": {
+        "source-mapping": "ContextBuilder creates context_sources and citation IDs from the exact included chunk order.",
+        "citation-style": "Answers use numbered source markers such as S1.",
+        "context-budget": "Context length is bounded by a character budget.",
+        "chunk-schema": "Chunk metadata contains source, page, and section fields.",
+        "metadata-guide": "Metadata should remain stable across retrieval stages."
+      }
+    }
+  ]
+}

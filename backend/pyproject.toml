@@ -14,6 +14,11 @@ dependencies = [
     "rank-bm25>=0.2.2,<1",
 ]
 
+[project.optional-dependencies]
+observability = [
+    "langfuse>=4.7,<5",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0,<10",
@@ -26,4 +31,6 @@ pythonpath = ["."]
 addopts = "--strict-markers"
 markers = [
     "external_llm: opt-in tests that call the configured external LLM API",
+    "external_langfuse: opt-in test that sends one sanitized Langfuse trace",
+    "external_reranker: opt-in test that calls the configured reranker API",
 ]

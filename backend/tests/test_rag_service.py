@@ -7,6 +7,7 @@ import pytest
 from src.llm import ChatMessage, LLMRequestError
 from src.rag.context_builder import ContextBuildResult, ContextBuilder
 from src.rag.schemas import SearchHit
+from src.rag.retrieval import RetrievalDiagnostics, RetrievalResult
 from src.rag.service import (
     NO_EVIDENCE_ANSWER,
     BasicRAGService,
@@ -23,6 +24,26 @@ class FakeRetriever:
     def retrieve(self, query: str) -> list[SearchHit]:
         self.queries.append(query)
         return list(self.hits)
+
+
+class FakeDiagnosticRetriever(FakeRetriever):
+    """Return request-local diagnostics with the configured final hits."""
+
+    def __init__(
+        self,
+        hits: list[SearchHit],
+        diagnostics: RetrievalDiagnostics,
+    ) -> None:
+        super().__init__(hits)
+        self.diagnostics = diagnostics
+
+    def retrieve_with_diagnostics(self, query: str) -> RetrievalResult:
+        """Record a query and return one structured retrieval result."""
+        self.queries.append(query)
+        return RetrievalResult(
+            hits=list(self.hits),
+            diagnostics=self.diagnostics,
+        )
 
 
 class RecordingContextBuilder:
@@ -100,6 +121,23 @@ def _mixed_hits() -> list[SearchHit]:
     ]
 
 
+def _diagnostics() -> RetrievalDiagnostics:
+    return RetrievalDiagnostics(
+        mode="hybrid",
+        dense_count=2,
+        bm25_count=2,
+        fused_count=2,
+        rerank_input_count=2,
+        rerank_output_count=2,
+        reranker_enabled=True,
+        dense_latency_ms=1.0,
+        bm25_latency_ms=1.0,
+        fusion_latency_ms=1.0,
+        rerank_latency_ms=1.0,
+        total_latency_ms=4.0,
+    )
+
+
 def test_service_calls_retriever_context_builder_and_llm() -> None:
     retriever = FakeRetriever(_mixed_hits())
     context_builder = RecordingContextBuilder()
@@ -119,6 +157,17 @@ def test_service_calls_retriever_context_builder_and_llm() -> None:
     ]
     assert len(llm.calls) == 1
     assert result.answer == "Checkpoint state is persisted [S1]."
+    assert result.retrieved_chunk_ids == ["md-1", "pdf-1"]
+
+
+def test_service_propagates_request_diagnostics_with_final_hits() -> None:
+    diagnostics = _diagnostics()
+    retriever = FakeDiagnosticRetriever(_mixed_hits(), diagnostics)
+
+    result = BasicRAGService(retriever, FakeLLM()).answer("question")
+
+    assert retriever.queries == ["question"]
+    assert result.retrieval_diagnostics == diagnostics
     assert result.retrieved_chunk_ids == ["md-1", "pdf-1"]
 
 

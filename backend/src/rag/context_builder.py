@@ -7,8 +7,16 @@ from pydantic import BaseModel, Field
 from src.rag.schemas import SearchHit, SourceType
 
 
-class ContextBuilderConfigurationError(ValueError):
+class ContextBuilderError(RuntimeError):
+    """Base class for recognized context construction failures."""
+
+
+class ContextBuilderConfigurationError(ValueError, ContextBuilderError):
     """Raised when context construction parameters are invalid."""
+
+
+class ContextBuildError(ContextBuilderError):
+    """Raised when retrieved hits cannot be converted to safe context."""
 
 
 class ContextSource(BaseModel):
