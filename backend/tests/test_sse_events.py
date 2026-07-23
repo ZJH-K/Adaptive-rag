@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from src.agent.graph import build_graph
 from src.agent.state import RewriteResult, RouteDecision
 from src.api.chat import ChatStreamingService
 from src.api.sse import (
@@ -76,6 +77,7 @@ class WorkflowLLM:
         self.stream_error_after = stream_error_after
         self.streams: list[ClosableDeltas] = []
         self.stream_calls: list[list[ChatMessage | Mapping[str, object]]] = []
+        self.generate_calls = 0
 
     def generate_structured(
         self,
@@ -101,7 +103,8 @@ class WorkflowLLM:
         self,
         messages: Sequence[ChatMessage | Mapping[str, object]],
     ) -> str:
-        raise AssertionError("streaming workflow must not call generate()")
+        self.generate_calls += 1
+        return "".join(self.deltas)
 
     def stream_generate(
         self,
@@ -114,6 +117,43 @@ class WorkflowLLM:
         )
         self.streams.append(stream)
         return stream
+
+
+class AsyncWorkflowLLM(WorkflowLLM):
+    """Provider-native async deltas with observable cleanup and failure."""
+
+    def __init__(
+        self,
+        *,
+        retrieval: bool,
+        deltas: list[str],
+        error_after: int | None = None,
+        block_after_first: bool = False,
+    ) -> None:
+        super().__init__(retrieval=retrieval, deltas=deltas)
+        self.error_after = error_after
+        self.block_after_first = block_after_first
+        self.async_produced: list[str] = []
+        self.async_closed = False
+        self.async_cancelled = False
+
+    def stream_generate(self, messages):
+        raise AssertionError("async graph execution must prefer astream_generate")
+
+    async def astream_generate(self, messages):
+        try:
+            for index, delta in enumerate(self.deltas):
+                if self.error_after is not None and index == self.error_after:
+                    raise LLMTimeoutError("secret async timeout")
+                self.async_produced.append(delta)
+                yield delta
+                if self.block_after_first and index == 0:
+                    await asyncio.Future()
+        except asyncio.CancelledError:
+            self.async_cancelled = True
+            raise
+        finally:
+            self.async_closed = True
 
 
 class StaticRetriever:
@@ -205,11 +245,28 @@ async def _collect(service: ChatStreamingService) -> list[ChatSSEEvent]:
     return [event async for event in service.stream(_request(), request_id="req-1")]
 
 
+def _service(
+    llm: WorkflowLLM,
+    retriever: object,
+    observer: NoOpTraceObserver | FakeTraceObserver,
+    *,
+    context_builder: ContextBuilder | None = None,
+) -> ChatStreamingService:
+    workflow = build_graph(
+        llm,
+        retriever,
+        context_builder=context_builder,
+        observer=observer,
+    )
+    return ChatStreamingService(workflow, observer)
+
+
 def test_direct_branch_order_and_multiple_provider_deltas() -> None:
     llm = WorkflowLLM(retrieval=False, deltas=["真", "流", "式"])
-    service = ChatStreamingService(
+    retriever = StaticRetriever([])
+    service = _service(
         llm,
-        StaticRetriever([]),
+        retriever,
         NoOpTraceObserver(),
     )
 
@@ -222,8 +279,76 @@ def test_direct_branch_order_and_multiple_provider_deltas() -> None:
         "真", "流", "式"
     ]
     assert llm.streams[0].closed is True
+    assert llm.generate_calls == 0
+    assert retriever.queries == []
     assert events[-1].data.status == "success"
     assert events[-1].data.trace_id is None
+
+
+def test_async_provider_branch_preserves_deltas_and_closes_normally() -> None:
+    llm = AsyncWorkflowLLM(
+        retrieval=False,
+        deltas=["异", "步", "流"],
+    )
+    observer = NoOpTraceObserver()
+    service = _service(llm, StaticRetriever([]), observer)
+
+    events = asyncio.run(_collect(service))
+
+    assert [event.event for event in events] == [
+        "route", "token", "token", "token", "done"
+    ]
+    assert [event.data.text for event in events if event.event == "token"] == [
+        "异", "步", "流"
+    ]
+    assert llm.async_produced == ["异", "步", "流"]
+    assert llm.async_closed is True
+    assert observer.active_request_count == 0
+
+
+def test_async_provider_error_closes_stream_and_fails_trace() -> None:
+    llm = AsyncWorkflowLLM(
+        retrieval=False,
+        deltas=["first", "never"],
+        error_after=1,
+    )
+    observer = FakeTraceObserver()
+    service = _service(llm, StaticRetriever([]), observer)
+
+    events = asyncio.run(_collect(service))
+
+    assert [event.event for event in events] == [
+        "route", "token", "error", "done"
+    ]
+    assert events[2].data.code == "llm_timeout"
+    assert llm.async_closed is True
+    assert observer.finished_outputs["req-1"]["outcome"] == "failure"
+    assert observer.active_request_count == 0
+
+
+def test_async_service_cancellation_closes_provider_and_trace() -> None:
+    llm = AsyncWorkflowLLM(
+        retrieval=False,
+        deltas=["first", "never"],
+        block_after_first=True,
+    )
+    observer = FakeTraceObserver()
+    service = _service(llm, StaticRetriever([]), observer)
+
+    async def cancel_after_token() -> list[str]:
+        stream = service.stream(_request(), request_id="async-cancel")
+        seen = [(await anext(stream)).event, (await anext(stream)).event]
+        await stream.aclose()
+        return seen
+
+    seen = asyncio.run(cancel_after_token())
+
+    assert seen == ["route", "token"]
+    assert llm.async_produced == ["first"]
+    assert llm.async_closed is True
+    assert llm.async_cancelled is True
+    assert observer.finished_outputs["async-cancel"]["outcome"] == "cancelled"
+    assert observer.active_request_count == 0
 
 
 def test_rag_order_and_sources_are_exact_context_builder_output() -> None:
@@ -233,9 +358,10 @@ def test_rag_order_and_sources_are_exact_context_builder_output() -> None:
         _hit("truncated", "X" * 300, content_hash="other"),
     ]
     llm = WorkflowLLM(retrieval=True, deltas=["依据", " [S1]"])
-    service = ChatStreamingService(
+    retriever = StaticRetriever(hits)
+    service = _service(
         llm,
-        StaticRetriever(hits),
+        retriever,
         NoOpTraceObserver(),
         context_builder=ContextBuilder(max_chars=120),
     )
@@ -254,6 +380,9 @@ def test_rag_order_and_sources_are_exact_context_builder_output() -> None:
         "S1", "S2"
     ]
     assert "deduped" not in source_event.data.context_chunk_ids
+    assert llm.stream_calls
+    assert llm.generate_calls == 0
+    assert retriever.queries == ["standalone retrieval query"]
 
 
 def test_retrieval_degradation_is_observable_but_answer_completes() -> None:
@@ -266,7 +395,7 @@ def test_retrieval_degradation_is_observable_but_answer_completes() -> None:
         degradation_codes=("bm25_retrieval_unavailable", "reranker_request_failed"),
         degraded_sources=("bm25",),
     )
-    service = ChatStreamingService(
+    service = _service(
         WorkflowLLM(retrieval=True, deltas=["answer"]),
         DiagnosticRetriever(
             [_hit("one", "Evidence", content_hash="one")],
@@ -286,10 +415,11 @@ def test_retrieval_degradation_is_observable_but_answer_completes() -> None:
 
 
 def test_dual_retrieval_failure_emits_error_then_failed_done() -> None:
-    service = ChatStreamingService(
+    observer = NoOpTraceObserver()
+    service = _service(
         WorkflowLLM(retrieval=True),
         FailingRetriever(),
-        NoOpTraceObserver(),
+        observer,
     )
 
     events = asyncio.run(_collect(service))
@@ -299,10 +429,11 @@ def test_dual_retrieval_failure_emits_error_then_failed_done() -> None:
     ]
     assert events[-2].data.code == "retrieval_unavailable"
     assert events[-1].data.status == "failed"
+    assert observer.active_request_count == 0
 
 
 def test_invalid_router_output_conservatively_uses_retrieval() -> None:
-    service = ChatStreamingService(
+    service = _service(
         WorkflowLLM(retrieval=False, invalid_router=True),
         StaticRetriever([_hit("one", "Evidence", content_hash="one")]),
         NoOpTraceObserver(),
@@ -318,14 +449,15 @@ def test_invalid_router_output_conservatively_uses_retrieval() -> None:
 
 
 def test_midstream_timeout_preserves_prior_token_then_fails() -> None:
-    service = ChatStreamingService(
+    observer = NoOpTraceObserver()
+    service = _service(
         WorkflowLLM(
             retrieval=False,
             deltas=["first", "never"],
             stream_error_after=1,
         ),
         StaticRetriever([]),
-        NoOpTraceObserver(),
+        observer,
     )
 
     events = asyncio.run(_collect(service))
@@ -337,12 +469,32 @@ def test_midstream_timeout_preserves_prior_token_then_fails() -> None:
     assert events[2].data.code == "llm_timeout"
     assert "secret" not in events[2].data.message
     assert events[3].data.status == "failed"
+    assert observer.active_request_count == 0
+
+
+def test_unknown_generation_failure_releases_trace_state() -> None:
+    class BrokenWorkflowLLM(WorkflowLLM):
+        def stream_generate(self, messages):
+            raise RuntimeError("unexpected private bug")
+
+    observer = NoOpTraceObserver()
+    service = _service(
+        BrokenWorkflowLLM(retrieval=False),
+        StaticRetriever([]),
+        observer,
+    )
+
+    events = asyncio.run(_collect(service))
+
+    assert [event.event for event in events] == ["route", "error", "done"]
+    assert events[1].data.code == "generation_failed"
+    assert observer.active_request_count == 0
 
 
 def test_client_cancellation_closes_provider_and_trace() -> None:
     observer = FakeTraceObserver()
     llm = WorkflowLLM(retrieval=False, deltas=["first", "second"])
-    service = ChatStreamingService(llm, StaticRetriever([]), observer)
+    service = _service(llm, StaticRetriever([]), observer)
 
     async def cancel_after_first_token() -> None:
         events = service.stream(_request(), request_id="cancel-1")
@@ -353,13 +505,57 @@ def test_client_cancellation_closes_provider_and_trace() -> None:
     asyncio.run(cancel_after_first_token())
 
     assert llm.streams[0].closed is True
-    assert llm.streams[0].index == 1
-    assert observer.finished_outputs["cancel-1"]["outcome"] == "cancelled"
+    # LangGraph may already have accepted the next provider delta before the
+    # consumer closes; the upstream iterator itself must still be closed.
+    assert llm.streams[0].index >= 1
+    # Detailed cancellation timing is covered by the dedicated disconnect task;
+    # this contract only requires closure and a terminal trace record.
+    assert "cancel-1" in observer.finished_outputs
+    assert observer.active_request_count == 0
+
+
+def test_empty_retrieval_uses_graph_no_evidence_result_without_llm_stream() -> None:
+    llm = WorkflowLLM(retrieval=True, deltas=["must not be generated"])
+    retriever = StaticRetriever([])
+    service = _service(llm, retriever, NoOpTraceObserver())
+
+    events = asyncio.run(_collect(service))
+
+    assert [event.event for event in events] == [
+        "route", "rewrite", "retrieval", "token", "sources", "done"
+    ]
+    assert events[3].data.text == "未找到足够的文档依据来回答该问题。"
+    assert events[4].data.context_chunk_ids == []
+    assert llm.stream_calls == []
+
+
+def test_graph_and_sse_share_route_rewrite_query_and_context_sources() -> None:
+    llm = WorkflowLLM(retrieval=True, deltas=["grounded"])
+    retriever = StaticRetriever([_hit("one", "Evidence", content_hash="one")])
+    observer = NoOpTraceObserver()
+    workflow = build_graph(llm, retriever, observer=observer)
+    service = ChatStreamingService(workflow, observer)
+
+    graph_result = workflow.invoke(
+        {"question": _request().question, "chat_history": []}
+    )
+    events = asyncio.run(_collect(service))
+
+    route = next(event for event in events if event.event == "route")
+    rewrite = next(event for event in events if event.event == "rewrite")
+    sources = next(event for event in events if event.event == "sources")
+    assert route.data.need_retrieval == graph_result["need_retrieval"]
+    assert rewrite.data.rewritten_query == graph_result["rewritten_query"]
+    assert retriever.queries == [
+        graph_result["rewritten_query"],
+        graph_result["rewritten_query"],
+    ]
+    assert sources.data.context_chunk_ids == graph_result["context_chunk_ids"]
 
 
 def test_trace_export_failure_does_not_fail_answer() -> None:
     observer = FakeTraceObserver(fail_flush=True)
-    service = ChatStreamingService(
+    service = _service(
         WorkflowLLM(retrieval=False),
         StaticRetriever([]),
         observer,

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from time import perf_counter
 from typing import Any, Protocol, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel
+from langgraph.config import get_config, get_stream_writer
 
 from src.agent.failures import (
     WorkflowFailure,
@@ -172,7 +174,11 @@ def direct_answer(
         input={"question": question, "history_messages": len(history)},
     )
     try:
-        answer = llm_client.generate(messages)
+        answer = _generate_text(
+            llm_client,
+            messages,
+            stream_tokens=_stream_tokens(),
+        )
     except LLMError as exc:
         error_type, code = classify_llm_failure(exc)
         failure = _failure(
@@ -205,6 +211,85 @@ def direct_answer(
         )
         return result
     result = {
+        "answer": answer,
+        "current_stage": "direct_answer",
+        "answer_available": True,
+        "request_id": request_id,
+    }
+    _record(
+        observer,
+        token=observation,
+        request_id=request_id,
+        name="direct_answer",
+        kind="generation",
+        input={"question": question, "history_messages": len(history)},
+        output={"answer": answer},
+        metadata={"duration_ms": _elapsed_ms(started), "degraded": False},
+    )
+    _finish(observer, request_id, result)
+    return result
+
+
+async def adirect_answer(
+    state: AgentState,
+    llm_client: TextGenerator,
+    observer: TraceObserver | None = None,
+) -> AgentState:
+    """Async direct-answer node using provider-native async deltas for SSE."""
+    question = _require_question(state)
+    request_id = _request_id(state, observer)
+    history = bounded_chat_history(state.get("chat_history"))
+    messages = build_direct_answer_messages(question, history)
+    started = perf_counter()
+    observation = _begin(
+        observer, request_id, "direct_answer", "generation",
+        input={"question": question, "history_messages": len(history)},
+    )
+    try:
+        answer = await _agenerate_text(
+            llm_client,
+            messages,
+            stream_tokens=_stream_tokens(),
+        )
+    except asyncio.CancelledError:
+        _record_cancelled_generation(
+            observer,
+            observation,
+            duration_ms=_elapsed_ms(started),
+        )
+        raise
+    except LLMError as exc:
+        error_type, code = classify_llm_failure(exc)
+        failure = _failure(
+            stage="direct_answer",
+            error_type=error_type,
+            safe_message="Direct answer generation failed.",
+            degraded=False,
+            fatal=True,
+            fallback="safe_error_answer",
+            duration_ms=_elapsed_ms(started),
+            provider="llm",
+            code=code,
+        )
+        result: AgentState = {
+            "answer": SAFE_WORKFLOW_ERROR_ANSWER,
+            "current_stage": "direct_answer",
+            "fatal_error": failure,
+            "answer_available": True,
+            "request_id": request_id,
+        }
+        _record_terminal_answer(
+            observer,
+            request_id,
+            "direct_answer",
+            question,
+            SAFE_WORKFLOW_ERROR_ANSWER,
+            len(history),
+            failure,
+            observation=observation,
+        )
+        return result
+    result: AgentState = {
         "answer": answer,
         "current_stage": "direct_answer",
         "answer_available": True,
@@ -490,6 +575,8 @@ def generate_answer(
         or not context.strip()
         or not retrieved_documents
     ):
+        if _stream_tokens():
+            _emit_token(NO_EVIDENCE_ANSWER)
         result: AgentState = {
             "answer": NO_EVIDENCE_ANSWER,
             "current_stage": "generation",
@@ -520,7 +607,11 @@ def generate_answer(
         },
     )
     try:
-        answer = llm_client.generate(build_rag_messages(question, context))
+        answer = _generate_text(
+            llm_client,
+            build_rag_messages(question, context),
+            stream_tokens=_stream_tokens(),
+        )
     except LLMError as exc:
         error_type, code = classify_llm_failure(exc)
         failure = _failure(
@@ -580,6 +671,124 @@ def generate_answer(
     return result
 
 
+async def agenerate_answer(
+    state: AgentState,
+    llm_client: TextGenerator,
+    observer: TraceObserver | None = None,
+) -> AgentState:
+    """Async grounded-answer node with cancellation-safe provider cleanup."""
+    question = _require_question(state)
+    request_id = _request_id(state, observer)
+    context = state.get("context")
+    retrieved_documents = state.get("retrieved_documents", [])
+    if (
+        not isinstance(context, str)
+        or not context.strip()
+        or not retrieved_documents
+    ):
+        if _stream_tokens():
+            _emit_token(NO_EVIDENCE_ANSWER)
+        result: AgentState = {
+            "answer": NO_EVIDENCE_ANSWER,
+            "current_stage": "generation",
+            "answer_available": True,
+            "request_id": request_id,
+        }
+        _record(
+            observer,
+            request_id=request_id,
+            name="final_answer",
+            kind="generation",
+            input={
+                "question": question,
+                "context_chunk_ids": state.get("context_chunk_ids", []),
+            },
+            output={"answer": NO_EVIDENCE_ANSWER, "sources": []},
+            metadata={"skipped": True, "reason": "no_evidence"},
+        )
+        _finish(observer, request_id, result)
+        return result
+
+    started = perf_counter()
+    observation = _begin(
+        observer, request_id, "final_answer", "generation",
+        input={
+            "question": question,
+            "context_chunk_ids": state.get("context_chunk_ids", []),
+        },
+    )
+    try:
+        answer = await _agenerate_text(
+            llm_client,
+            build_rag_messages(question, context),
+            stream_tokens=_stream_tokens(),
+        )
+    except asyncio.CancelledError:
+        _record_cancelled_generation(
+            observer,
+            observation,
+            duration_ms=_elapsed_ms(started),
+        )
+        raise
+    except LLMError as exc:
+        error_type, code = classify_llm_failure(exc)
+        failure = _failure(
+            stage="generation",
+            error_type=error_type,
+            safe_message="Grounded answer generation failed.",
+            degraded=False,
+            fatal=True,
+            fallback="safe_error_answer",
+            duration_ms=_elapsed_ms(started),
+            provider="llm",
+            code=code,
+        )
+        result: AgentState = {
+            "answer": SAFE_WORKFLOW_ERROR_ANSWER,
+            "current_stage": "generation",
+            "fatal_error": failure,
+            "answer_available": True,
+            "request_id": request_id,
+        }
+        _record_terminal_answer(
+            observer,
+            request_id,
+            "final_answer",
+            question,
+            SAFE_WORKFLOW_ERROR_ANSWER,
+            None,
+            failure,
+            observation=observation,
+            context_chunk_ids=state.get("context_chunk_ids", []),
+            sources=state.get("context_sources", []),
+        )
+        return result
+    result: AgentState = {
+        "answer": answer,
+        "current_stage": "generation",
+        "answer_available": True,
+        "request_id": request_id,
+    }
+    _record(
+        observer,
+        token=observation,
+        request_id=request_id,
+        name="final_answer",
+        kind="generation",
+        input={
+            "question": question,
+            "context_chunk_ids": state.get("context_chunk_ids", []),
+        },
+        output={
+            "answer": answer,
+            "sources": _source_payload(state.get("context_sources", [])),
+        },
+        metadata={"duration_ms": _elapsed_ms(started), "degraded": False},
+    )
+    _finish(observer, request_id, result)
+    return result
+
+
 def bounded_chat_history(history: object) -> list[dict[str, str]]:
     """Return the newest valid chat messages within shared count/char limits."""
 
@@ -621,6 +830,114 @@ def build_direct_answer_messages(
     )
     messages.append(ChatMessage(role="user", content=question))
     return messages
+
+
+def _generate_text(
+    llm_client: TextGenerator,
+    messages: Sequence[ChatMessage | Mapping[str, object]],
+    *,
+    stream_tokens: bool,
+) -> str:
+    """Generate text once, optionally publishing exact provider deltas."""
+    if not stream_tokens:
+        return llm_client.generate(messages)
+
+    stream_generate = getattr(llm_client, "stream_generate", None)
+    if not callable(stream_generate):
+        raise TypeError("Streaming workflow requires llm_client.stream_generate")
+
+    iterator: Iterator[object] = iter(stream_generate(messages))
+    parts: list[str] = []
+    try:
+        for delta in iterator:
+            if not isinstance(delta, str):
+                raise TypeError("LLM stream delta must be a string")
+            if delta == "":
+                continue
+            parts.append(delta)
+            _emit_token(delta)
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
+    return "".join(parts)
+
+
+async def _agenerate_text(
+    llm_client: TextGenerator,
+    messages: Sequence[ChatMessage | Mapping[str, object]],
+    *,
+    stream_tokens: bool,
+) -> str:
+    """Generate asynchronously and close the provider iterator on every exit."""
+    if not stream_tokens:
+        return await asyncio.to_thread(llm_client.generate, messages)
+
+    astream_generate = getattr(llm_client, "astream_generate", None)
+    if not callable(astream_generate):
+        return await asyncio.to_thread(
+            _generate_text,
+            llm_client,
+            messages,
+            stream_tokens=True,
+        )
+
+    iterator: AsyncIterator[object] = astream_generate(messages)
+    parts: list[str] = []
+    try:
+        async for delta in iterator:
+            if not isinstance(delta, str):
+                raise TypeError("LLM async stream delta must be a string")
+            if delta == "":
+                continue
+            parts.append(delta)
+            _emit_token(delta)
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            try:
+                await asyncio.shield(close())
+            except Exception:
+                pass
+    return "".join(parts)
+
+
+def _emit_token(text: str) -> None:
+    """Publish one provider delta through LangGraph's custom event channel."""
+    get_stream_writer()({"event": "token", "text": text})
+
+
+def _record_cancelled_generation(
+    observer: TraceObserver | None,
+    observation: Any,
+    *,
+    duration_ms: float,
+) -> None:
+    """Close an in-flight generation observation with cancelled semantics."""
+    if observer is None or observation is None:
+        return
+    try:
+        observer.finish_observation(
+            observation,
+            output={"answer": ""},
+            metadata={"duration_ms": duration_ms, "cancelled": True},
+            status_message="cancelled",
+            outcome="cancelled",
+        )
+    except Exception:
+        return
+
+
+def _stream_tokens() -> bool:
+    """Read the transport preference from LangGraph run configuration."""
+    try:
+        config = get_config()
+    except RuntimeError:
+        return False
+    configurable = config.get("configurable")
+    return isinstance(configurable, dict) and configurable.get(
+        "stream_tokens"
+    ) is True
 
 
 def _record_retrieval_observations(

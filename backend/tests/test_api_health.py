@@ -69,6 +69,21 @@ def _settings(**updates: Any) -> Settings:
     return Settings(_env_file=None, **values)
 
 
+def test_liveness_does_not_require_runtime_or_provider_credentials() -> None:
+    def fail_factory(settings: Settings) -> Any:
+        raise RuntimeError("runtime unavailable")
+
+    app = create_app(
+        Settings(_env_file=None),
+        runtime_factory=fail_factory,
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/live")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
 def test_health_ok_uses_shared_runtime_and_request_id() -> None:
     runtime = FakeRuntime()
     build_count = 0
@@ -85,9 +100,11 @@ def test_health_ok_uses_shared_runtime_and_request_id() -> None:
 
     assert first.status_code == 200
     assert first.json()["status"] == "ok"
-    assert first.json()["request_id"] == "local-123"
-    assert first.headers["X-Request-ID"] == "local-123"
+    assert first.json()["request_id"] == first.headers["X-Request-ID"]
+    assert first.headers["X-Request-ID"] != "local-123"
+    assert first.headers["X-Client-Request-ID"] == "local-123"
     assert second.status_code == 200
+    assert second.headers["X-Request-ID"] != first.headers["X-Request-ID"]
     assert build_count == 1
 
 
@@ -176,12 +193,14 @@ def test_known_error_has_safe_envelope_and_request_id() -> None:
         )
 
     assert response.status_code == 503
-    assert response.headers["X-Request-ID"] == "error-456"
+    request_id = response.headers["X-Request-ID"]
+    assert request_id != "error-456"
+    assert response.headers["X-Client-Request-ID"] == "error-456"
     assert response.json() == {
         "error": {
             "code": "test_unavailable",
             "message": "Try again later.",
-            "request_id": "error-456",
+            "request_id": request_id,
         }
     }
 

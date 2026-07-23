@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import inspect
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from src.agent.graph import build_graph
 from src.api.chat import ChatStreamingService
@@ -30,6 +33,7 @@ from src.rag.runtime import RetrievalRuntime, build_retrieval_runtime
 
 
 logger = logging.getLogger(__name__)
+CLIENT_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 RuntimeFactory = Callable[[Settings], RetrievalRuntime]
 ObserverFactory = Callable[[Settings], TraceObserver]
 LLMFactory = Callable[[Settings], Any]
@@ -83,8 +87,7 @@ def create_app(
                 observer=observer,
             )
             services.chat_service = ChatStreamingService(
-                llm_client,
-                runtime.retriever,
+                services.workflow,
                 observer,
             )
             services.accepting_operations = True
@@ -96,19 +99,28 @@ def create_app(
             yield
         finally:
             services.accepting_operations = False
-            try:
-                observer.flush()
-            except Exception:
-                logger.exception("Observability flush failed during shutdown")
-            try:
-                observer.shutdown()
-            except Exception:
-                logger.exception("Observability shutdown failed")
+            if services.llm_client is not None:
+                await _safe_async_cleanup(
+                    getattr(services.llm_client, "aclose", None),
+                    "Async LLM client close failed",
+                )
+                await _safe_sync_cleanup(
+                    getattr(services.llm_client, "close", None),
+                    "Synchronous LLM client close failed",
+                )
+            await _safe_sync_cleanup(
+                observer.flush,
+                "Observability flush failed during shutdown",
+            )
+            await _safe_sync_cleanup(
+                observer.shutdown,
+                "Observability shutdown failed",
+            )
             if services.runtime is not None:
-                try:
-                    services.runtime.close()
-                except Exception:
-                    logger.exception("Retrieval runtime close failed")
+                await _safe_sync_cleanup(
+                    services.runtime.close,
+                    "Retrieval runtime close failed",
+                )
 
     app = FastAPI(
         title="Adaptive RAG API",
@@ -118,10 +130,22 @@ def create_app(
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next: Callable[..., Any]):
-        request_id = request.headers.get("X-Request-ID") or uuid4().hex
-        request.state.request_id = request_id[:128]
+        request.state.request_id = uuid4().hex
+        client_request_id = request.headers.get("X-Request-ID")
+        request.state.client_request_id = client_request_id
+        if client_request_id is not None and CLIENT_REQUEST_ID_PATTERN.fullmatch(
+            client_request_id
+        ) is None:
+            return _error_response(
+                request,
+                400,
+                "invalid_client_request_id",
+                "X-Request-ID contains unsupported characters or length.",
+            )
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
+        if client_request_id is not None:
+            response.headers["X-Client-Request-ID"] = client_request_id
         return response
 
     @app.exception_handler(APIError)
@@ -178,8 +202,42 @@ def _error_response(
             request_id=request_id,
         )
     )
+    headers = {"X-Request-ID": request_id}
+    client_request_id = getattr(request.state, "client_request_id", None)
+    if client_request_id is not None and CLIENT_REQUEST_ID_PATTERN.fullmatch(
+        client_request_id
+    ) is not None:
+        headers["X-Client-Request-ID"] = client_request_id
     return JSONResponse(
         status_code=status_code,
         content=body.model_dump(),
-        headers={"X-Request-ID": request_id},
+        headers=headers,
     )
+
+
+async def _safe_sync_cleanup(
+    cleanup: Callable[[], Any] | None,
+    message: str,
+) -> None:
+    """Run one blocking cleanup without preventing later resources closing."""
+    if not callable(cleanup):
+        return
+    try:
+        await run_in_threadpool(cleanup)
+    except Exception:
+        logger.exception(message)
+
+
+async def _safe_async_cleanup(
+    cleanup: Callable[[], Any] | None,
+    message: str,
+) -> None:
+    """Await one optional async cleanup and contain only cleanup failures."""
+    if not callable(cleanup):
+        return
+    try:
+        result = cleanup()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.exception(message)

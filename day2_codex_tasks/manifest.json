@@ -1,0 +1,15 @@
+{
+  "project": "Adaptive RAG",
+  "phase": "Day 2",
+  "task_count": 7,
+  "files": [
+    "00_DAY2_TASK_INDEX.md",
+    "01_markdown_heading_chunker.md",
+    "02_pdf_page_aware_chunker.md",
+    "03_chunker_factory_and_ingestion_integration.md",
+    "04_context_builder_and_citations.md",
+    "05_deepseek_client.md",
+    "06_basic_rag_service.md",
+    "07_builtin_docs_and_day2_acceptance.md"
+  ]
+}

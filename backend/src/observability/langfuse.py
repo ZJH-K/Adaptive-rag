@@ -31,13 +31,25 @@ class LangfuseTraceObserver(SafeTraceObserver):
         self.environment = environment
         self._roots: dict[str, Any] = {}
 
-    def _start_request(self, request_id: str) -> str | None:
+    @property
+    def active_root_count(self) -> int:
+        """Return request roots that have not reached a terminal lifecycle."""
+        return len(self._roots)
+
+    def _start_request(
+        self,
+        request_id: str,
+        client_request_id: str | None,
+    ) -> str | None:
         trace_id = self.client.create_trace_id()
+        metadata = {"environment": self.environment}
+        if client_request_id is not None:
+            metadata["client_request_id"] = client_request_id
         root = self.client.start_observation(
             as_type="span",
             name="chat_request",
             input={"request_id": request_id},
-            metadata={"environment": self.environment},
+            metadata=metadata,
             trace_context={"trace_id": trace_id},
         )
         self._roots[request_id] = root

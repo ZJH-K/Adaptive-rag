@@ -31,12 +31,14 @@ class Client:
         self.parents: list[tuple[str, str]] = []
         self.updated: list[str] = []
         self.ended: list[str] = []
+        self.root_calls: list[dict[str, Any]] = []
         self.shutdown_called = False
 
     def create_trace_id(self) -> str:
         return "b" * 32
 
     def start_observation(self, **kwargs: Any) -> Handle:
+        self.root_calls.append(kwargs)
         return Handle(self, kwargs["name"])
 
     def flush(self) -> None:
@@ -99,7 +101,7 @@ def test_initialization_failure_has_safe_code() -> None:
 def test_root_parents_children_and_successfully_exports() -> None:
     client = Client()
     observer = LangfuseTraceObserver(client, environment="test")
-    status = observer.start_request()
+    status = observer.start_request(client_request_id="client-correlation")
     assert status.request_id is not None
     first = observer.start_observation(
         request_id=status.request_id, name="router", kind="generation"
@@ -119,6 +121,13 @@ def test_root_parents_children_and_successfully_exports() -> None:
     assert set(client.ended) == {"router", "final_answer", "chat_request"}
     assert exported.trace_id == "b" * 32
     assert exported.trace_exported is True
+    assert exported.client_request_id == "client-correlation"
+    assert client.root_calls[0]["input"] == {"request_id": status.request_id}
+    assert client.root_calls[0]["metadata"] == {
+        "environment": "test",
+        "client_request_id": "client-correlation",
+    }
+    assert observer.active_root_count == 0
 
 
 def test_export_failure_keeps_real_trace_id_but_marks_not_exported() -> None:

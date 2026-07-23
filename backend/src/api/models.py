@@ -19,6 +19,12 @@ class APIErrorResponse(BaseModel):
     error: APIErrorDetail
 
 
+class LivenessResponse(BaseModel):
+    """Process liveness independent of runtime or provider readiness."""
+
+    status: Literal["alive"] = "alive"
+
+
 class ChromaHealth(BaseModel):
     """Local vector-store readiness without an external probe."""
 

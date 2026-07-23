@@ -1,0 +1,48 @@
+{
+  "run_id": "eval-20260722T203727Z",
+  "validate_only": true,
+  "dataset_version": "day7-task04-v1",
+  "sample_count": 24,
+  "experiments": {
+    "A": {
+      "experiment": "A",
+      "status": "VALIDATED",
+      "reason_code": "validation_only_no_metrics",
+      "validated_chunk_count": 12,
+      "indexed_chunk_count": null,
+      "completed_sample_count": 0,
+      "failed_sample_count": 0,
+      "aggregate": null
+    },
+    "B": {
+      "experiment": "B",
+      "status": "VALIDATED",
+      "reason_code": "validation_only_no_metrics",
+      "validated_chunk_count": 22,
+      "indexed_chunk_count": null,
+      "completed_sample_count": 0,
+      "failed_sample_count": 0,
+      "aggregate": null
+    },
+    "C": {
+      "experiment": "C",
+      "status": "VALIDATED",
+      "reason_code": "validation_only_no_metrics",
+      "validated_chunk_count": 22,
+      "indexed_chunk_count": null,
+      "completed_sample_count": 0,
+      "failed_sample_count": 0,
+      "aggregate": null
+    },
+    "D": {
+      "experiment": "D",
+      "status": "VALIDATED",
+      "reason_code": "validation_only_no_metrics",
+      "validated_chunk_count": 22,
+      "indexed_chunk_count": null,
+      "completed_sample_count": 0,
+      "failed_sample_count": 0,
+      "aggregate": null
+    }
+  }
+}

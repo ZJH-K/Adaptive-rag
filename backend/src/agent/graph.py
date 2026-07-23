@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from functools import partial
 
+from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from src.agent.nodes import (
     TextGenerator,
+    adirect_answer,
+    agenerate_answer,
     direct_answer,
     generate_answer,
     retrieve,
@@ -41,10 +44,18 @@ def build_graph(
     )
     workflow.add_node(
         "direct_answer",
-        partial(
-            direct_answer,
-            llm_client=llm_client,
-            observer=configured_observer,
+        RunnableLambda(
+            partial(
+                direct_answer,
+                llm_client=llm_client,
+                observer=configured_observer,
+            ),
+            afunc=partial(
+                adirect_answer,
+                llm_client=llm_client,
+                observer=configured_observer,
+            ),
+            name="direct_answer",
         ),
     )
     workflow.add_node(
@@ -66,10 +77,18 @@ def build_graph(
     )
     workflow.add_node(
         "generate_answer",
-        partial(
-            generate_answer,
-            llm_client=llm_client,
-            observer=configured_observer,
+        RunnableLambda(
+            partial(
+                generate_answer,
+                llm_client=llm_client,
+                observer=configured_observer,
+            ),
+            afunc=partial(
+                agenerate_answer,
+                llm_client=llm_client,
+                observer=configured_observer,
+            ),
+            name="generate_answer",
         ),
     )
 

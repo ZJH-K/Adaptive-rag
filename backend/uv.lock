@@ -13,6 +13,7 @@ name = "adaptive-rag-backend"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "chromadb" },
     { name = "fastapi" },
     { name = "jieba" },
@@ -40,6 +41,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4,<5" },
     { name = "chromadb", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "jieba", specifier = ">=0.42.1,<1" },
