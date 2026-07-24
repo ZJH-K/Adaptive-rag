@@ -64,6 +64,20 @@ class RecordingRuntime:
         self.close_calls += 1
 
 
+class RecordingLLM:
+    """Record both SDK client lifecycle surfaces."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.aclose_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
 class _VectorStore:
     def count(self) -> int:
         return 0
@@ -111,6 +125,10 @@ def test_lifespan_builds_once_and_closes_shared_services() -> None:
         assert client.get("/api/health").status_code == 200
         assert client.get("/api/health").status_code == 200
         assert app.state.services.accepting_operations is True
+        assert (
+            app.state.services.chat_service.workflow
+            is app.state.services.workflow
+        )
 
     assert runtime_builds == 1
     assert observer_builds == 1
@@ -146,6 +164,23 @@ def test_dependencies_return_lifespan_owned_objects() -> None:
     assert all(response.json().values())
 
 
+def test_lifespan_closes_llm_sync_and_async_clients_once() -> None:
+    runtime = RecordingRuntime()
+    llm = RecordingLLM()
+    app = create_app(
+        _settings(),
+        runtime_factory=lambda configured: runtime,
+        llm_factory=lambda configured: llm,
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert llm.aclose_calls == 1
+    assert llm.close_calls == 1
+    assert runtime.close_calls == 1
+
+
 def test_shutdown_failures_do_not_block_remaining_cleanup() -> None:
     events: list[str] = []
 
@@ -163,12 +198,24 @@ def test_shutdown_failures_do_not_block_remaining_cleanup() -> None:
             events.append("close")
             raise RuntimeError("close failed")
 
+    class FailingLLM(RecordingLLM):
+        async def aclose(self) -> None:
+            events.append("llm_aclose")
+            raise RuntimeError("async llm close failed")
+
+        def close(self) -> None:
+            events.append("llm_close")
+            raise RuntimeError("sync llm close failed")
+
     app = create_app(
         _settings(),
         runtime_factory=lambda settings: FailingRuntime(),
         observer_factory=lambda settings: FailingObserver(),
+        llm_factory=lambda settings: FailingLLM(),
     )
     with TestClient(app) as client:
         assert client.get("/api/health").status_code == 200
 
-    assert events == ["flush", "shutdown", "close"]
+    assert events == [
+        "llm_aclose", "llm_close", "flush", "shutdown", "close"
+    ]

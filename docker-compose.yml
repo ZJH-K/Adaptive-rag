@@ -1,0 +1,65 @@
+name: adaptive-rag
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      KNOWLEDGE_ROOT: /app/knowledge
+      UPLOAD_TEMP_DIR: /app/data/uploads/tmp
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./knowledge:/app/knowledge:ro
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/live', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 5
+    command:
+      - uvicorn
+      - src.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5

@@ -111,6 +111,7 @@ class DoneEventData(BaseModel):
 
     status: Literal["success", "failed", "cancelled"]
     request_id: str
+    client_request_id: str | None = None
     trace_id: str | None = None
     tracing_enabled: bool
     tracing_configured: bool

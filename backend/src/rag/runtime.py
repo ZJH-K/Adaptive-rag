@@ -41,6 +41,7 @@ class RetrievalRuntime:
         ingestion_pipeline: IngestionPipeline,
         owns_vector_store: bool,
         consistency_lock: RLock,
+        embedding_client: RuntimeEmbeddingClient | None = None,
     ) -> None:
         """Store components created by :func:`build_retrieval_runtime`."""
         self.vector_store = vector_store
@@ -52,6 +53,8 @@ class RetrievalRuntime:
         self.ingestion_pipeline = ingestion_pipeline
         self._owns_vector_store = owns_vector_store
         self._consistency_lock = consistency_lock
+        self.embedding_client = embedding_client
+        self._closed = False
 
     def rebuild_from_store(self) -> BM25IndexStatus:
         """Explicitly recover BM25 from the authoritative Chroma corpus."""
@@ -84,9 +87,26 @@ class RetrievalRuntime:
             return self.vector_store.get_all_chunks(), self.bm25_index.status()
 
     def close(self) -> None:
-        """Close the vector store when this runtime created it."""
+        """Idempotently close embedding and owned vector-store resources."""
+        with self._consistency_lock:
+            if self._closed:
+                return
+            self._closed = True
+        first_error: Exception | None = None
+        embedding_close = getattr(self.embedding_client, "close", None)
+        if callable(embedding_close):
+            try:
+                embedding_close()
+            except Exception as exc:
+                first_error = exc
         if self._owns_vector_store:
-            self.vector_store.close()
+            try:
+                self.vector_store.close()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def __enter__(self) -> Self:
         """Return this initialized runtime as a context manager."""
@@ -149,6 +169,7 @@ def build_retrieval_runtime(
         ingestion_pipeline=ingestion,
         owns_vector_store=owns_vector_store,
         consistency_lock=consistency_lock,
+        embedding_client=embedding_client,
     )
     try:
         runtime.startup()

@@ -6,6 +6,7 @@ from src.api.models import (
     BM25Health,
     ChromaHealth,
     HealthResponse,
+    LivenessResponse,
     ModelHealth,
     RerankerHealth,
     TracingHealth,
@@ -15,6 +16,12 @@ from src.rag.retrieval import get_reranker_status
 
 
 router = APIRouter(prefix="/api", tags=["health"])
+
+
+@router.get("/live", response_model=LivenessResponse)
+def live() -> LivenessResponse:
+    """Report process liveness without requiring providers or runtime readiness."""
+    return LivenessResponse()
 
 
 @router.get(

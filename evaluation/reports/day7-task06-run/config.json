@@ -1,0 +1,140 @@
+{
+  "run_id": "eval-20260722T204032Z",
+  "created_at_utc": "2026-07-22T20:40:32.439620+00:00",
+  "validate_only": false,
+  "dataset_path": "E:\\Adaptive RAG\\evaluation\\dataset.jsonl",
+  "dataset_version": "day7-task04-v1",
+  "dataset_sha256": "918772e23d2106d310df524d52c1a7bfc0964ffa328be53b0b9612fc1b3816a0",
+  "sample_count": 24,
+  "knowledge_files": [
+    "knowledge/markdown/context_citation_guide.md",
+    "knowledge/markdown/embedding_batching.md",
+    "knowledge/markdown/langgraph_checkpoint.md",
+    "knowledge/pdf/dense_retrieval_guide.pdf",
+    "knowledge/pdf/ingestion_recovery_manual.pdf"
+  ],
+  "knowledge_sha256": {
+    "knowledge/markdown/context_citation_guide.md": "e09d14db92fd6ca26695e2f075f3cd689ae39487d6a622411123be02a7c9531e",
+    "knowledge/markdown/embedding_batching.md": "2db399ca1be6396ce19cb8cd807580e51241ed72ae7027dc938059ffbcbb90c6",
+    "knowledge/markdown/langgraph_checkpoint.md": "db99a578cb7759ade4cf98be0466ff207a8928e52650b489f4c07e0ceb39dfc1",
+    "knowledge/pdf/dense_retrieval_guide.pdf": "3b8a4cf4b4103ffc3eba03ddda8af1a75f80457c773e778a349ddd9aa134ea63",
+    "knowledge/pdf/ingestion_recovery_manual.pdf": "e7badcc022547bf7a5a2fa9824ef7f1d79100057f3374c7eb7da98dac87ea24b"
+  },
+  "cutoffs": [
+    1,
+    3,
+    5,
+    10
+  ],
+  "python_version": "3.13.13",
+  "code_version": "b96efd74f4446add04a44a9968b8ee33a20d1d8c",
+  "working_tree_dirty": true,
+  "dependency_lock_sha256": "701592b20ed18ec377954fa5060f0c0099fa93815bdc8fcd07d83e2327d7500a",
+  "providers": {
+    "embedding_configured": true,
+    "llm_configured": true,
+    "reranker_configured": false
+  },
+  "experiments": {
+    "A": {
+      "experiment": "A",
+      "chunk_strategy": "recursive",
+      "chunk_strategies_by_source_type": {
+        "markdown": "recursive",
+        "pdf": "recursive"
+      },
+      "dense_enabled": true,
+      "bm25_enabled": false,
+      "rrf_enabled": false,
+      "rrf_k": 60,
+      "reranker_enabled": false,
+      "dense_top_n": 20,
+      "bm25_top_n": 20,
+      "retrieve_top_n": 20,
+      "rerank_top_k": 20,
+      "embedding_model": "qwen3.7-text-embedding",
+      "reranker_model": "BAAI/bge-reranker-v2-m3",
+      "llm_model": "deepseek-v4-flash",
+      "collection_name": "adaptive_rag_eval_a",
+      "persist_path": "E:\\Adaptive RAG\\evaluation\\reports\\day7-task06-run\\indexes\\A",
+      "dataset_version": "day7-task04-v1",
+      "chunk_size": 800,
+      "chunk_overlap": 100
+    },
+    "B": {
+      "experiment": "B",
+      "chunk_strategy": "source_optimized",
+      "chunk_strategies_by_source_type": {
+        "markdown": "markdown_heading",
+        "pdf": "pdf_page_aware"
+      },
+      "dense_enabled": true,
+      "bm25_enabled": false,
+      "rrf_enabled": false,
+      "rrf_k": 60,
+      "reranker_enabled": false,
+      "dense_top_n": 20,
+      "bm25_top_n": 20,
+      "retrieve_top_n": 20,
+      "rerank_top_k": 20,
+      "embedding_model": "qwen3.7-text-embedding",
+      "reranker_model": "BAAI/bge-reranker-v2-m3",
+      "llm_model": "deepseek-v4-flash",
+      "collection_name": "adaptive_rag_eval_b",
+      "persist_path": "E:\\Adaptive RAG\\evaluation\\reports\\day7-task06-run\\indexes\\B",
+      "dataset_version": "day7-task04-v1",
+      "chunk_size": 800,
+      "chunk_overlap": 100
+    },
+    "C": {
+      "experiment": "C",
+      "chunk_strategy": "source_optimized",
+      "chunk_strategies_by_source_type": {
+        "markdown": "markdown_heading",
+        "pdf": "pdf_page_aware"
+      },
+      "dense_enabled": true,
+      "bm25_enabled": true,
+      "rrf_enabled": true,
+      "rrf_k": 60,
+      "reranker_enabled": false,
+      "dense_top_n": 20,
+      "bm25_top_n": 20,
+      "retrieve_top_n": 20,
+      "rerank_top_k": 20,
+      "embedding_model": "qwen3.7-text-embedding",
+      "reranker_model": "BAAI/bge-reranker-v2-m3",
+      "llm_model": "deepseek-v4-flash",
+      "collection_name": "adaptive_rag_eval_c",
+      "persist_path": "E:\\Adaptive RAG\\evaluation\\reports\\day7-task06-run\\indexes\\C",
+      "dataset_version": "day7-task04-v1",
+      "chunk_size": 800,
+      "chunk_overlap": 100
+    },
+    "D": {
+      "experiment": "D",
+      "chunk_strategy": "source_optimized",
+      "chunk_strategies_by_source_type": {
+        "markdown": "markdown_heading",
+        "pdf": "pdf_page_aware"
+      },
+      "dense_enabled": true,
+      "bm25_enabled": true,
+      "rrf_enabled": true,
+      "rrf_k": 60,
+      "reranker_enabled": true,
+      "dense_top_n": 20,
+      "bm25_top_n": 20,
+      "retrieve_top_n": 20,
+      "rerank_top_k": 5,
+      "embedding_model": "qwen3.7-text-embedding",
+      "reranker_model": "BAAI/bge-reranker-v2-m3",
+      "llm_model": "deepseek-v4-flash",
+      "collection_name": "adaptive_rag_eval_d",
+      "persist_path": "E:\\Adaptive RAG\\evaluation\\reports\\day7-task06-run\\indexes\\D",
+      "dataset_version": "day7-task04-v1",
+      "chunk_size": 800,
+      "chunk_overlap": 100
+    }
+  }
+}

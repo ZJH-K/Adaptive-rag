@@ -1,0 +1,20 @@
+{
+  "package": "Adaptive RAG Day7 Codex Tasks",
+  "source_documents": [
+    "adaptive_rag_project_technical_spec.md",
+    "Day6_Review_Report.md"
+  ],
+  "files": [
+    "Day7_Task_Index.md",
+    "Day7_Task_01_统一_LangGraph与SSE生产编排.md",
+    "Day7_Task_02_加固_RequestID与Trace生命周期.md",
+    "Day7_Task_03_验证异步SSE取消与客户端资源释放.md",
+    "Day7_Task_04_构建正式Evaluation数据集.md",
+    "Day7_Task_05_实现Evaluation指标库.md",
+    "Day7_Task_06_实现ABCD实验Runner与报告.md",
+    "Day7_Task_07_完成Docker镜像与Compose部署.md",
+    "Day7_Task_08_完成README架构_NOTICE与演示材料.md"
+  ],
+  "task_count": 8,
+  "required_sections_validated": true
+}

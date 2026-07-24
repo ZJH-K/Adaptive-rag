@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
+from time import monotonic
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
@@ -23,12 +25,15 @@ class TracingStatus(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     request_id: str | None = None
+    client_request_id: str | None = None
     tracing_enabled: bool
     tracing_configured: bool
     tracing_available: bool
     trace_id: str | None = None
     trace_exported: bool = False
     trace_error_code: str | None = None
+    outcome: TraceOutcome | None = None
+    completed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +86,12 @@ class TraceObserver(Protocol):
     """Lifecycle capability injected into workflow nodes."""
 
     def startup(self) -> TracingStatus: ...
-    def start_request(self, request_id: str | None = None) -> TracingStatus: ...
+    def start_request(
+        self,
+        request_id: str | None = None,
+        *,
+        client_request_id: str | None = None,
+    ) -> TracingStatus: ...
 
     def start_observation(
         self,
@@ -127,6 +137,7 @@ class TraceObserver(Protocol):
     ) -> TracingStatus: ...
 
     def cancel_request(self, request_id: str) -> TracingStatus: ...
+    def fail_request(self, request_id: str) -> TracingStatus: ...
     def get_status(self, request_id: str | None = None) -> TracingStatus: ...
     def flush(self) -> bool: ...
     def shutdown(self) -> None: ...
@@ -134,6 +145,9 @@ class TraceObserver(Protocol):
 
 class SafeTraceObserver(ABC):
     """Apply redaction and contain all telemetry failures."""
+
+    TERMINAL_CACHE_CAPACITY = 256
+    TERMINAL_CACHE_TTL_SECONDS = 300.0
 
     _BLOCKED_KEYS = {
         "api_key", "authorization", "context", "document_text", "headers",
@@ -154,21 +168,38 @@ class SafeTraceObserver(ABC):
         self._configured = configured
         self._available = available
         self._startup_error_code = error_code
-        self._statuses: dict[str, TracingStatus] = {}
+        self._active_statuses: dict[str, TracingStatus] = {}
+        self._finishing_statuses: dict[str, TracingStatus] = {}
+        self._terminal_statuses: OrderedDict[
+            str, tuple[float, TracingStatus]
+        ] = OrderedDict()
         self._lock = Lock()
 
     def startup(self) -> TracingStatus:
         """Return provider readiness for application lifespan startup."""
         return self.get_status()
 
-    def start_request(self, request_id: str | None = None) -> TracingStatus:
+    def start_request(
+        self,
+        request_id: str | None = None,
+        *,
+        client_request_id: str | None = None,
+    ) -> TracingStatus:
         """Create a local request and a provider trace only when available."""
         local_id = request_id if _valid_request_id(request_id) else uuid4().hex
+        with self._lock:
+            self._prune_terminal_locked()
+            if (
+                local_id in self._active_statuses
+                or local_id in self._finishing_statuses
+                or local_id in self._terminal_statuses
+            ):
+                local_id = uuid4().hex
         trace_id: str | None = None
         error_code = self._startup_error_code
         if self._available:
             try:
-                trace_id = self._start_request(local_id)
+                trace_id = self._start_request(local_id, client_request_id)
                 if not _valid_trace_id(trace_id):
                     trace_id = None
                     error_code = "trace_creation_failed"
@@ -177,6 +208,7 @@ class SafeTraceObserver(ABC):
                 error_code = "trace_creation_failed"
         status = TracingStatus(
             request_id=local_id,
+            client_request_id=client_request_id,
             tracing_enabled=self._enabled,
             tracing_configured=self._configured,
             tracing_available=self._available and trace_id is not None,
@@ -184,7 +216,7 @@ class SafeTraceObserver(ABC):
             trace_error_code=error_code,
         )
         with self._lock:
-            self._statuses[local_id] = status
+            self._active_statuses[local_id] = status
         return status
 
     def start_observation(
@@ -278,6 +310,21 @@ class SafeTraceObserver(ABC):
         metadata: dict[str, Any] | None = None,
         outcome: TraceOutcome = "success",
     ) -> TracingStatus:
+        with self._lock:
+            self._prune_terminal_locked()
+            cached = self._terminal_statuses.get(request_id)
+            if cached is not None:
+                self._terminal_statuses.move_to_end(request_id)
+                return cached[1]
+            status = self._active_statuses.pop(request_id, None)
+            if status is not None:
+                self._finishing_statuses[request_id] = status
+            elif request_id in self._finishing_statuses:
+                return self._finishing_statuses[request_id]
+        if status is None:
+            return self._inactive_status(request_id, outcome)
+
+        finish_failed = False
         try:
             self._finish_request(
                 request_id,
@@ -286,21 +333,48 @@ class SafeTraceObserver(ABC):
                 outcome,
             )
         except Exception:
-            self._set_error(request_id, "trace_finish_failed")
-        exported = self.flush() if self.get_status(request_id).tracing_available else False
+            finish_failed = True
+            status = status.model_copy(
+                update={"trace_error_code": "trace_finish_failed"}
+            )
+        exported = (
+            self.flush()
+            if status.tracing_available and not finish_failed
+            else False
+        )
         if exported:
-            self._update_status(request_id, trace_exported=True)
-        elif self.get_status(request_id).tracing_available:
-            self._set_error(request_id, "trace_export_failed")
-        return self.get_status(request_id)
+            status = status.model_copy(update={"trace_exported": True})
+        elif status.tracing_available and not finish_failed:
+            status = status.model_copy(
+                update={
+                    "trace_exported": False,
+                    "trace_error_code": "trace_export_failed",
+                }
+            )
+        terminal = status.model_copy(
+            update={"outcome": outcome, "completed": True}
+        )
+        with self._lock:
+            self._finishing_statuses.pop(request_id, None)
+            self._cache_terminal_locked(request_id, terminal)
+        return terminal
 
     def cancel_request(self, request_id: str) -> TracingStatus:
         return self.finish_request(request_id, outcome="cancelled")
 
+    def fail_request(self, request_id: str) -> TracingStatus:
+        """Idempotently finish an active request with a failure outcome."""
+        return self.finish_request(request_id, outcome="failure")
+
     def get_status(self, request_id: str | None = None) -> TracingStatus:
         if request_id is not None:
             with self._lock:
-                status = self._statuses.get(request_id)
+                self._prune_terminal_locked()
+                status = self._active_statuses.get(request_id)
+                if status is None:
+                    status = self._finishing_statuses.get(request_id)
+                if status is None and request_id in self._terminal_statuses:
+                    status = self._terminal_statuses[request_id][1]
             if status is not None:
                 return status
         return TracingStatus(
@@ -321,22 +395,95 @@ class SafeTraceObserver(ABC):
             return False
 
     def shutdown(self) -> None:
+        with self._lock:
+            request_ids = tuple(self._active_statuses)
+        for request_id in request_ids:
+            self.cancel_request(request_id)
         try:
             self._shutdown()
         except Exception:
             with self._lock:
-                request_ids = tuple(self._statuses)
-            for request_id in request_ids:
-                self._set_error(request_id, "trace_shutdown_failed")
+                terminal_ids = tuple(self._terminal_statuses)
+            for request_id in terminal_ids:
+                self._update_terminal_error(request_id, "trace_shutdown_failed")
 
     def _set_error(self, request_id: str, code: str) -> None:
         self._update_status(request_id, trace_exported=False, trace_error_code=code)
 
     def _update_status(self, request_id: str, **updates: Any) -> None:
         with self._lock:
-            current = self._statuses.get(request_id)
+            current = self._active_statuses.get(request_id)
             if current is not None:
-                self._statuses[request_id] = current.model_copy(update=updates)
+                self._active_statuses[request_id] = current.model_copy(update=updates)
+                return
+            current = self._finishing_statuses.get(request_id)
+            if current is not None:
+                self._finishing_statuses[request_id] = current.model_copy(
+                    update=updates
+                )
+
+    @property
+    def active_request_count(self) -> int:
+        """Return the number of request lifecycles that still own resources."""
+        with self._lock:
+            return len(self._active_statuses) + len(self._finishing_statuses)
+
+    @property
+    def terminal_cache_count(self) -> int:
+        """Return the bounded idempotency-cache size after TTL pruning."""
+        with self._lock:
+            self._prune_terminal_locked()
+            return len(self._terminal_statuses)
+
+    def _inactive_status(
+        self,
+        request_id: str,
+        outcome: TraceOutcome,
+    ) -> TracingStatus:
+        return TracingStatus(
+            request_id=request_id,
+            tracing_enabled=self._enabled,
+            tracing_configured=self._configured,
+            tracing_available=False,
+            trace_exported=False,
+            trace_error_code="trace_request_not_active",
+            outcome=outcome,
+            completed=True,
+        )
+
+    def _cache_terminal_locked(
+        self,
+        request_id: str,
+        status: TracingStatus,
+    ) -> None:
+        expires_at = monotonic() + self.TERMINAL_CACHE_TTL_SECONDS
+        self._terminal_statuses[request_id] = (expires_at, status)
+        self._terminal_statuses.move_to_end(request_id)
+        while len(self._terminal_statuses) > self.TERMINAL_CACHE_CAPACITY:
+            self._terminal_statuses.popitem(last=False)
+
+    def _prune_terminal_locked(self) -> None:
+        now = monotonic()
+        expired = [
+            request_id
+            for request_id, (expires_at, _) in self._terminal_statuses.items()
+            if expires_at <= now
+        ]
+        for request_id in expired:
+            self._terminal_statuses.pop(request_id, None)
+
+    def _update_terminal_error(self, request_id: str, code: str) -> None:
+        with self._lock:
+            cached = self._terminal_statuses.get(request_id)
+            if cached is None:
+                return
+            expires_at, status = cached
+            self._terminal_statuses[request_id] = (
+                expires_at,
+                status.model_copy(
+                    update={"trace_exported": False, "trace_error_code": code}
+                ),
+            )
 
     def _sanitize(self, value: Any, *, key: str | None = None) -> Any:
         if isinstance(value, dict):
@@ -363,7 +510,11 @@ class SafeTraceObserver(ABC):
             return value
         return value[: self.policy.max_text_chars] + "…[truncated]"
 
-    def _start_request(self, request_id: str) -> str | None:
+    def _start_request(
+        self,
+        request_id: str,
+        client_request_id: str | None,
+    ) -> str | None:
         return None
 
     def _start_observation(self, token: ObservationToken) -> Any:
@@ -441,7 +592,11 @@ class FakeTraceObserver(SafeTraceObserver):
             if (status := self.get_status(request_id)).trace_id is not None
         ]
 
-    def _start_request(self, request_id: str) -> str | None:
+    def _start_request(
+        self,
+        request_id: str,
+        client_request_id: str | None,
+    ) -> str | None:
         with self._fake_lock:
             self._request_started[request_id] = datetime.now(timezone.utc)
         return uuid4().hex

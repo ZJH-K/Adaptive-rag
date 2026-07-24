@@ -104,6 +104,30 @@ class DeepSeekClient:
         """Return non-empty assistant text for an ordered message sequence."""
         return self._request_text(messages)
 
+    def close(self) -> None:
+        """Idempotently close the lazily-created synchronous SDK client."""
+        client = self._api_client
+        self._api_client = None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    async def aclose(self) -> None:
+        """Idempotently close the lazily-created asynchronous SDK client."""
+        client = self._async_api_client
+        self._async_api_client = None
+        if client is None:
+            return
+        close = getattr(client, "aclose", None)
+        if not callable(close):
+            close = getattr(client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
     def generate_structured(
         self,
         messages: Sequence[ChatMessage | Mapping[str, object]],

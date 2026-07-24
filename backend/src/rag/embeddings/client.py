@@ -91,6 +91,16 @@ class EmbeddingClient:
             raise EmbeddingInputError("Query text must be a non-empty string")
         return self.embed_documents([text])[0]
 
+    def close(self) -> None:
+        """Idempotently close the lazily-created provider HTTP client."""
+        client = self._api_client
+        self._api_client = None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
     def _validate_configuration(self) -> None:
         """Validate all constructor configuration except the optional API key."""
         if not isinstance(self.base_url, str) or not self.base_url.strip():

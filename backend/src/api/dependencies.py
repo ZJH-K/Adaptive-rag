@@ -20,6 +20,7 @@ class ChatService(Protocol):
         request: ChatStreamRequest,
         *,
         request_id: str,
+        client_request_id: str | None = None,
     ) -> AsyncIterator[ChatSSEEvent]: ...
 
 

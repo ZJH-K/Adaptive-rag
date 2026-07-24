@@ -77,3 +77,81 @@ def test_shutdown_failure_is_contained_and_diagnostic() -> None:
     assert observer.get_status(status.request_id).trace_error_code == (
         "trace_shutdown_failed"
     )
+
+
+def test_noop_observer_releases_1000_completed_requests() -> None:
+    observer = NoOpTraceObserver()
+
+    for _ in range(1000):
+        started = observer.start_request()
+        assert started.request_id is not None
+        terminal = observer.finish_request(started.request_id)
+        assert terminal.completed is True
+
+    assert observer.active_request_count == 0
+    assert observer.terminal_cache_count <= observer.TERMINAL_CACHE_CAPACITY
+
+
+def test_duplicate_requested_internal_id_cannot_overwrite_active_request() -> None:
+    observer = NoOpTraceObserver()
+
+    first = observer.start_request("fixed-id")
+    second = observer.start_request("fixed-id")
+
+    assert first.request_id == "fixed-id"
+    assert second.request_id != first.request_id
+    assert observer.active_request_count == 2
+    assert first.request_id and second.request_id
+    observer.cancel_request(first.request_id)
+    observer.cancel_request(second.request_id)
+    assert observer.active_request_count == 0
+
+
+def test_all_terminal_paths_release_active_state() -> None:
+    observer = NoOpTraceObserver()
+    outcomes = []
+
+    completed = observer.start_request()
+    failed = observer.start_request()
+    cancelled = observer.start_request()
+    assert completed.request_id and failed.request_id and cancelled.request_id
+    outcomes.append(observer.finish_request(completed.request_id).outcome)
+    outcomes.append(observer.fail_request(failed.request_id).outcome)
+    outcomes.append(observer.cancel_request(cancelled.request_id).outcome)
+
+    assert outcomes == ["success", "failure", "cancelled"]
+    assert observer.active_request_count == 0
+
+
+def test_repeated_finish_and_cancel_are_idempotent_and_isolated() -> None:
+    observer = FakeTraceObserver()
+    first = observer.start_request()
+    second = observer.start_request()
+    assert first.request_id and second.request_id
+
+    first_terminal = observer.finish_request(first.request_id)
+    repeated = observer.cancel_request(first.request_id)
+
+    assert repeated == first_terminal
+    assert repeated.outcome == "success"
+    assert observer.active_request_count == 1
+    second_terminal = observer.cancel_request(second.request_id)
+    assert second_terminal.outcome == "cancelled"
+    assert observer.active_request_count == 0
+
+
+def test_finish_exception_still_releases_request_state() -> None:
+    class FinishFailureObserver(FakeTraceObserver):
+        def _finish_request(self, *args, **kwargs) -> None:
+            raise RuntimeError("private provider failure")
+
+    observer = FinishFailureObserver()
+    started = observer.start_request()
+    assert started.request_id
+
+    terminal = observer.fail_request(started.request_id)
+
+    assert terminal.completed is True
+    assert terminal.trace_exported is False
+    assert terminal.trace_error_code == "trace_finish_failed"
+    assert observer.active_request_count == 0

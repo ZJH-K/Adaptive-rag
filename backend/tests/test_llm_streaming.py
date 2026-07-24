@@ -212,3 +212,35 @@ def test_closing_async_delta_iterator_closes_upstream_immediately() -> None:
     asyncio.run(consume_one())
     assert stream.closed is True
     assert stream.index == 1
+
+
+def test_llm_sync_and_async_clients_close_idempotently() -> None:
+    class SyncClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class AsyncClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    sync_client = SyncClient()
+    async_client = AsyncClient()
+    client = DeepSeekClient(
+        Settings(_env_file=None, llm_api_key="offline-key"),
+        api_client=sync_client,
+        async_api_client=async_client,
+    )
+
+    client.close()
+    client.close()
+    asyncio.run(client.aclose())
+    asyncio.run(client.aclose())
+
+    assert sync_client.close_calls == 1
+    assert async_client.close_calls == 1

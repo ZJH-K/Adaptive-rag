@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import RLock
 
 import pytest
 
 from src.config import Settings
-from src.rag.runtime import build_retrieval_runtime
+from src.rag.runtime import RetrievalRuntime, build_retrieval_runtime
 from src.rag.schemas import Chunk, SearchHit
 from src.rag.vectorstore import ChromaVectorStore
 from tests.fakes import FakeEmbeddingClient
@@ -187,3 +188,35 @@ def test_runtime_exposes_one_shared_consistency_lock(tmp_path: Path) -> None:
         assert runtime.ingestion_pipeline._consistency_lock is (
             runtime._consistency_lock
         )
+
+
+def test_runtime_closes_embedding_and_vector_store_despite_failure() -> None:
+    events: list[str] = []
+
+    class Embedding:
+        def close(self) -> None:
+            events.append("embedding")
+            raise RuntimeError("embedding close failed")
+
+    class VectorStore:
+        def close(self) -> None:
+            events.append("vector_store")
+
+    runtime = RetrievalRuntime(
+        vector_store=VectorStore(),
+        bm25_index=object(),
+        dense_retriever=object(),
+        bm25_retriever=object(),
+        reranker=object(),
+        retriever=object(),
+        ingestion_pipeline=object(),
+        owns_vector_store=True,
+        consistency_lock=RLock(),
+        embedding_client=Embedding(),
+    )
+
+    with pytest.raises(RuntimeError, match="embedding close failed"):
+        runtime.close()
+    runtime.close()
+
+    assert events == ["embedding", "vector_store"]

@@ -260,3 +260,19 @@ def test_constructor_arguments_override_settings() -> None:
     assert client.dimension == 3
     assert client.batch_size == 2
     assert client.timeout_seconds == 5
+
+
+def test_embedding_provider_client_close_is_idempotent() -> None:
+    fake = FakeAPIClient()
+    fake.close_calls = 0
+
+    def close() -> None:
+        fake.close_calls += 1
+
+    fake.close = close
+    client = _client(fake)
+
+    client.close()
+    client.close()
+
+    assert fake.close_calls == 1

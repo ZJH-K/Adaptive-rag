@@ -6,6 +6,8 @@ __pycache__/
 htmlcov/
 *.py[cod]
 /backend/data/
+/data/
+/evaluation/reports/*/indexes/
 
 # Local project instructions and task materials
 /Adaptive_RAG_Day1_Codex_Package/
